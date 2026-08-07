@@ -8,6 +8,8 @@ use Reprint\Importer\State\FileDiffProgressState;
 use Reprint\Importer\State\FilesPullSummaryState;
 use Reprint\Importer\State\RemoteFileIndexCursorState;
 
+use function WordPress\Filesystem\wp_join_unix_paths;
+
 require_once __DIR__ . '/class-pull-failure-reported-exception.php';
 
 /**
@@ -302,8 +304,8 @@ class Pull
                 $state->files_pull_path_selection_fingerprint = null;
                 $this->client->save_state();
                 foreach ([
-                    "{$pull_state_directory}/remote-index.next.jsonl",
-                    "{$pull_state_directory}/fetch-list.jsonl",
+                    wp_join_unix_paths($pull_state_directory, 'remote-index.next.jsonl'),
+                    wp_join_unix_paths($pull_state_directory, 'fetch-list.jsonl'),
                 ] as $path) {
                     if (file_exists($path)) {
                         @unlink($path);
@@ -321,9 +323,9 @@ class Pull
                 $state->db_index = new DatabaseTableIndexState();
                 $this->client->save_state();
                 foreach ([
-                    "{$state_dir}/db.sql",
-                    "{$state_dir}/db-tables.jsonl",
-                    "{$pull_state_directory}/domains.json",
+                    wp_join_unix_paths($state_dir, 'db.sql'),
+                    wp_join_unix_paths($state_dir, 'db-tables.jsonl'),
+                    wp_join_unix_paths($pull_state_directory, 'domains.json'),
                 ] as $path) {
                     if (file_exists($path)) {
                         @unlink($path);
@@ -458,13 +460,13 @@ class Pull
                 if (
                     $state->active_resumable_command->command_name !== 'db-pull' ||
                     $state->active_resumable_command->completion_state !== 'complete' ||
-                    !file_exists($this->client->state_dir . '/db.sql')
+                    !file_exists(wp_join_unix_paths($this->client->state_dir, 'db.sql'))
                 ) {
                     $this->run_until_complete('db-pull', function () {
                         $this->client->run_db_sync();
                     });
                 }
-                $sql_file = $this->client->state_dir . "/db.sql";
+                $sql_file = wp_join_unix_paths($this->client->state_dir, 'db.sql');
                 $size = null;
                 if (file_exists($sql_file)) {
                     $bytes = filesize($sql_file);
@@ -562,7 +564,7 @@ class Pull
         $options = $this->validate_database_target_options($options);
 
         if (empty($options['output_dir'])) {
-            $options['output_dir'] = $this->client->state_dir . '/runtime';
+            $options['output_dir'] = wp_join_unix_paths($this->client->state_dir, 'runtime');
         }
 
         if (!isset($options['filter'])) {
@@ -820,13 +822,13 @@ class Pull
 
         $paths = [];
         if ($reset_file_transfer_state) {
-            $paths[] = $pull_state_directory . "/remote-index.next.jsonl";
-            $paths[] = $pull_state_directory . "/fetch-list.jsonl";
+            $paths[] = wp_join_unix_paths($pull_state_directory, 'remote-index.next.jsonl');
+            $paths[] = wp_join_unix_paths($pull_state_directory, 'fetch-list.jsonl');
         }
         if ($reset_db_state) {
-            $paths[] = $state_dir . "/db.sql";
-            $paths[] = $state_dir . "/db-tables.jsonl";
-            $paths[] = $pull_state_directory . "/domains.json";
+            $paths[] = wp_join_unix_paths($state_dir, 'db.sql');
+            $paths[] = wp_join_unix_paths($state_dir, 'db-tables.jsonl');
+            $paths[] = wp_join_unix_paths($pull_state_directory, 'domains.json');
         }
 
         foreach ($paths as $path) {
@@ -871,8 +873,8 @@ class Pull
      */
     private function start_server(array $options): void
     {
-        $output_dir = $options['output_dir'] ?? $this->client->state_dir . '/runtime';
-        $start_sh = $output_dir . '/start.sh';
+        $output_dir = $options['output_dir'] ?? wp_join_unix_paths($this->client->state_dir, 'runtime');
+        $start_sh = wp_join_unix_paths($output_dir, 'start.sh');
 
         if (!file_exists($start_sh)) {
             throw new RuntimeException(
