@@ -221,7 +221,7 @@ final class FilesPullLocalIndexTest extends TestCase
         ]);
 
         $this->abortFilesPull();
-        $delta = $this->runFilesPull(['--intent=copy-changes']);
+        $delta = $this->runFilesPull(['--sync=catch-up']);
 
         $this->assertSame(0, $delta['exit'], $delta['output']);
         $this->assertSame('longer local edit', file_get_contents($this->localTree . '/edited.txt'));
@@ -250,7 +250,7 @@ final class FilesPullLocalIndexTest extends TestCase
         ], $records);
     }
 
-    public function testMakeIdenticalRestoresLocalChanges(): void
+    public function testMirrorRestoresLocalChanges(): void
     {
         $this->completeFilesPull();
         file_put_contents($this->localTree . '/edited.txt', 'longer local edit');
@@ -281,7 +281,7 @@ final class FilesPullLocalIndexTest extends TestCase
         ]], $this->filesDiffRecords($diff['stdout']));
     }
 
-    public function testMakeIdenticalLeavesChangesOutsideIncludeSelectionAlone(): void
+    public function testMirrorLeavesChangesOutsideIncludeSelectionAlone(): void
     {
         $this->completeFilesPull();
         file_put_contents($this->localTree . '/edited.txt', 'outside selection');
@@ -408,7 +408,7 @@ final class FilesPullLocalIndexTest extends TestCase
             '--filter=essential-files',
         ]];
         yield 'preserve local files' => [[
-            '--intent=copy-changes',
+            '--sync=catch-up',
             '--on-fs-root-nonempty=preserve-local',
         ]];
     }

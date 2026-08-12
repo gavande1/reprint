@@ -110,30 +110,31 @@ sorted path mutations directly and removes an indexed subtree when its root is
 deleted or replaced. Non-empty directories remain implicit. A successful
 initial pull with no local mutations creates an empty local index.
 
-Files-pull has two intents. `--intent=make-identical` is the default. After
-the next remote index is complete, it uses a resumable `PushPlan` to build a
-fresh local index. The same `FileIndexDiffProcessor` used by `PushPlan`
-compares the retained and fresh local indexes one path at a time. Files-pull
-merges those local differences with the selected next remote index mapped into
-local relative paths. Each locally changed selected root is removed, and every
-current remote entry at or below that root enters the fetch list. Local-only
-selected paths therefore disappear, while local edits and deletions are
-restored from the current remote tree. `--intent=copy-changes` skips the local
-plan and retains the remote-index comparison: only changes between the remote
-index and next remote index are applied locally.
+Files-pull has two sync behaviors. `--sync=mirror` is the default. It removes
+local changes under the selected paths, then downloads the remote values.
+`--sync=catch-up` leaves local changes alone and applies only changes made on
+the remote since the last completed pull.
+
+Mirror uses `PushPlan` to build a fresh local index. It then gives
+`FileSyncPatchPlanner` the fresh local index as the patch base and the retained
+local index as the patch result. This reverses local changes made since the
+last sync. The planner handles file changes, type changes, sparse directories,
+selection, and redundant subtree deletions. Files-pull only applies the
+planner's operations: it removes the local path and queues the matching path
+from the current remote index when a remote value is needed. The existing
+remote-index diff then adds changes made remotely since the last sync.
 
 Remote and local indexes cannot be compared directly because ctime is
-machine-local. Make-identical therefore combines the remote-index difference
-with the inverse of the retained-to-fresh local-index difference, with the
-current remote tree supplying every replacement.
+machine-local. Mirror instead combines two comparisons made in one machine's
+coordinates: the inverse local-index change and the remote-index change.
 
-The intent is durable files-pull state. A resumed lifecycle must use the same
-intent. `make-identical` is incompatible with `preserve-local`, whose purpose
+The `--sync` value is durable files-pull state. A resumed lifecycle must use
+the same value. `mirror` is incompatible with `preserve-local`, whose purpose
 is to retain local paths; callers which need that behavior use
-`--intent=copy-changes`. Path selection still limits both intents, and
-make-identical leaves local changes outside the selected paths untouched.
-One files-pull plan cursor owns local indexing, index comparison, mapped-index,
-fetch-list, and active changed-root positions.
+`--sync=catch-up`. Path selection limits both behaviors, and mirror leaves
+local changes outside the selected paths untouched. One files-pull plan cursor
+owns local indexing, the `FileSyncPatchPlanner` cursor, the mapped-index byte
+offset, and the fetch-list byte offset.
 
 `PushPlan` first builds a path-sorted fresh local index, then derives the local
 paths to push and delete by diffing it against the local index its caller
@@ -346,7 +347,9 @@ state:
   pull/
     index.wal                           completed pull mutations awaiting application to both indexes
     local-index.next.jsonl              selected next remote index mapped to local relative paths
-    make-identical-plan/                resumable local plan owned by files-pull
+    mirror-plan/                       resumable mirror work owned by files-pull
+      fresh_local_index.jsonl          current filesystem-root scan
+      deleted_directories_stack.jsonl  active directory-deletion roots
   push/
     excluded_paths.json                 sender-owned target exclusions
     sender.json                         active push state

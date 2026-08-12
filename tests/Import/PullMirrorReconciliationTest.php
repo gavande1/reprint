@@ -9,7 +9,7 @@ use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
-final class PullIntentReconciliationTest extends TestCase
+final class PullMirrorReconciliationTest extends TestCase
 {
     private string $root;
     private string $stateDirectory;
@@ -18,7 +18,7 @@ final class PullIntentReconciliationTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->root = sys_get_temp_dir() . '/pull-intent-reconciliation-' . bin2hex(random_bytes(6));
+        $this->root = sys_get_temp_dir() . '/pull-mirror-reconciliation-' . bin2hex(random_bytes(6));
         $this->stateDirectory = $this->root . '/state';
         $this->filesystemRoot = $this->root . '/files';
         mkdir($this->stateDirectory, 0700, true);
@@ -31,7 +31,7 @@ final class PullIntentReconciliationTest extends TestCase
         parent::tearDown();
     }
 
-    public function testMakeIdenticalRemovesLocalChangesAndFetchesRemoteReplacements(): void
+    public function testMirrorRemovesLocalChangesAndFetchesRemoteReplacements(): void
     {
         file_put_contents($this->filesystemRoot . '/edited.txt', 'old');
         file_put_contents($this->filesystemRoot . '/deleted.txt', 'delete me');
@@ -63,9 +63,9 @@ final class PullIntentReconciliationTest extends TestCase
             }
         }
         $this->assertLessThan(10, $attempt);
-        $this->call($client, 'build_next_local_index_file');
+        $this->call($client, 'map_next_remote_index_to_local_paths');
         for ($attempt = 0; $attempt < 10; ++$attempt) {
-            if ($this->call($client, 'reconcile_local_changes_with_next_remote_index')) {
+            if ($this->call($client, 'apply_mirror_operations')) {
                 break;
             }
         }
@@ -81,7 +81,7 @@ final class PullIntentReconciliationTest extends TestCase
         );
     }
 
-    public function testMakeIdenticalLeavesLocalChangesOutsideOnlySelection(): void
+    public function testMirrorLeavesLocalChangesOutsideOnlySelection(): void
     {
         mkdir($this->filesystemRoot . '/selected');
         file_put_contents($this->filesystemRoot . '/selected/edited.txt', 'old');
@@ -109,8 +109,8 @@ final class PullIntentReconciliationTest extends TestCase
         while (!$this->call($client, 'build_fresh_local_index')) {
             continue;
         }
-        $this->call($client, 'build_next_local_index_file');
-        while (!$this->call($client, 'reconcile_local_changes_with_next_remote_index')) {
+        $this->call($client, 'map_next_remote_index_to_local_paths');
+        while (!$this->call($client, 'apply_mirror_operations')) {
             continue;
         }
 
@@ -120,7 +120,7 @@ final class PullIntentReconciliationTest extends TestCase
         $this->assertSame(['/selected/edited.txt'], $this->readFetchList($client));
     }
 
-    public function testMakeIdenticalFetchesRemoteDescendantsAfterLocalFileReplacesDirectory(): void
+    public function testMirrorFetchesRemoteDescendantsAfterLocalFileReplacesDirectory(): void
     {
         mkdir($this->filesystemRoot . '/tree');
         file_put_contents($this->filesystemRoot . '/tree/child.txt', 'remote child');
@@ -143,8 +143,8 @@ final class PullIntentReconciliationTest extends TestCase
         while (!$this->call($client, 'build_fresh_local_index')) {
             continue;
         }
-        $this->call($client, 'build_next_local_index_file');
-        while (!$this->call($client, 'reconcile_local_changes_with_next_remote_index')) {
+        $this->call($client, 'map_next_remote_index_to_local_paths');
+        while (!$this->call($client, 'apply_mirror_operations')) {
             continue;
         }
 
@@ -152,7 +152,7 @@ final class PullIntentReconciliationTest extends TestCase
         $this->assertSame(['/tree/child.txt'], $this->readFetchList($client));
     }
 
-    public function testMakeIdenticalRetainsChangedRootsAcrossInterleavedSiblings(): void
+    public function testMirrorHandlesInterleavedSiblingPaths(): void
     {
         mkdir($this->filesystemRoot . '/tree');
         file_put_contents($this->filesystemRoot . '/tree/child.txt', 'remote child');
@@ -179,8 +179,8 @@ final class PullIntentReconciliationTest extends TestCase
         while (!$this->call($client, 'build_fresh_local_index')) {
             continue;
         }
-        $this->call($client, 'build_next_local_index_file');
-        while (!$this->call($client, 'reconcile_local_changes_with_next_remote_index')) {
+        $this->call($client, 'map_next_remote_index_to_local_paths');
+        while (!$this->call($client, 'apply_mirror_operations')) {
             continue;
         }
 

@@ -17,14 +17,14 @@ require_once __DIR__ . '/class-file-index-diff-processor.php';
  * The patch base index describes the state before the patch. The patch result
  * index describes the state after it. Both indexes use the same path
  * coordinates and are sorted by decoded path bytes. The caller chooses these
- * indexes based on the sync intent:
+ * indexes based on the sync behavior:
  *
  * - To make two file trees identical, compare the current destination index
  *   with the current source index.
  * - To copy only source changes, compare the source index saved at the last
  *   sync with the current source index. Apply that patch to the destination.
  *
- * The planner does not know the sync intent. It receives the two indexes
+ * The planner does not know the sync behavior. It receives the two indexes
  * already chosen by its caller.
  *
  * FileIndexDiffProcessor aligns their entries and labels each path. This
@@ -339,6 +339,14 @@ final class FileSyncPatchPlanner
                     $candidate_path_to_delete = $candidate_path;
                     break;
                 }
+            }
+            if (
+                !$this->path_may_change($candidate_path_to_delete)
+                && $this->path_may_change($index_path)
+            ) {
+                // The parent cannot be changed as a whole. Delete the selected
+                // entry without changing an unselected sibling.
+                $candidate_path_to_delete = $index_path;
             }
             if (
                 !$patch_base_empty_directory_is_implied_by_patch_result_descendant

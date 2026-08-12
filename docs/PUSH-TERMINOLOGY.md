@@ -57,10 +57,10 @@ local relative path to a document-root-relative path.
   mutations; files-push atomically replaces the local index only after the
   target confirms commit. Use `$local_index_file`.
 - A **fresh local index** is the current filesystem-root scan created by a
-  `PushPlan` for files-push, files-diff, or make-identical files-pull. Use
+  `PushPlan` for files-push, files-diff, or mirror files-pull. Use
   `$fresh_local_index_file`.
 - A **mapped next local index** is the selected next remote index projected
-  into sorted local relative paths for a make-identical files-pull. Use
+  into sorted local relative paths for a mirror files-pull. Use
   `$next_local_index_file`.
 - A **file-index diff processor** retains one entry from each of two sorted
   indexes and exposes one aligned local path until its caller completes and
@@ -198,7 +198,7 @@ their parent directories.
         │   ├── index.wal
         │   ├── remote-index.next.jsonl
         │   ├── local-index.next.jsonl
-        │   ├── make-identical-plan/
+        │   ├── mirror-plan/
         │   ├── fetch-list.jsonl
         │   ├── volatile-files.json
         │   ├── domains.json

@@ -60,10 +60,10 @@ class PullState
     public ?string $resolved_path_mappings_fingerprint = null;
     /** @var string|null Files-pull path-selection fingerprint; guards resume. */
     public ?string $files_pull_path_selection_fingerprint = null;
-    /** @var string|null Selected files-pull intent. */
-    public ?string $files_pull_intent = null;
-    /** @var array<string,mixed>|null Make-identical plan cursor. */
-    public ?array $files_pull_plan_cursor = null;
+    /** @var string|null Selected files-pull sync behavior. */
+    public ?string $files_pull_sync = null;
+    /** @var array<string,mixed>|null Mirror plan cursor. */
+    public ?array $files_pull_mirror_cursor = null;
     public FilesPullSummaryState $files_pull_summary;
     public DatabaseTableIndexState $db_index;
     public FileDiffProgressState $diff;
@@ -112,11 +112,11 @@ class PullState
         $this->pull_pipeline = new PullPipelineCheckpointState();
     }
 
-    /** Clears state owned by files-pull intent planning and reconciliation. */
-    public function reset_files_pull_intent_progress(): void
+    /** Clears state owned by files-pull mirror planning. */
+    public function reset_files_pull_sync_progress(): void
     {
-        $this->files_pull_intent = null;
-        $this->files_pull_plan_cursor = null;
+        $this->files_pull_sync = null;
+        $this->files_pull_mirror_cursor = null;
     }
 
     public static function from_array(array $data): self
@@ -136,8 +136,8 @@ class PullState
         $state->max_allowed_packet = $data['max_allowed_packet'];
         $state->resolved_path_mappings_fingerprint = $data['resolved_path_mappings_fingerprint'];
         $state->files_pull_path_selection_fingerprint = $data['files_pull_path_selection_fingerprint'];
-        $state->files_pull_intent = $data['files_pull_intent'];
-        $state->files_pull_plan_cursor = $data['files_pull_plan_cursor'];
+        $state->files_pull_sync = $data['files_pull_sync'];
+        $state->files_pull_mirror_cursor = $data['files_pull_mirror_cursor'];
         $state->files_pull_summary = FilesPullSummaryState::from_array($data['files_pull_summary']);
         $state->db_index = DatabaseTableIndexState::from_array($data['db_index']);
         $state->diff = FileDiffProgressState::from_array($data['diff']);
@@ -242,8 +242,8 @@ class PullState
             'max_allowed_packet' => $this->max_allowed_packet,
             'resolved_path_mappings_fingerprint' => $this->resolved_path_mappings_fingerprint,
             'files_pull_path_selection_fingerprint' => $this->files_pull_path_selection_fingerprint,
-            'files_pull_intent' => $this->files_pull_intent,
-            'files_pull_plan_cursor' => $this->files_pull_plan_cursor,
+            'files_pull_sync' => $this->files_pull_sync,
+            'files_pull_mirror_cursor' => $this->files_pull_mirror_cursor,
             'files_pull_summary' => $this->files_pull_summary->to_array(),
             'db_index' => $this->db_index->to_array(),
             'diff' => $this->diff->to_array(),

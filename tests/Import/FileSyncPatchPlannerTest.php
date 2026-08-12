@@ -165,6 +165,26 @@ final class FileSyncPatchPlannerTest extends TestCase
         $planner->close();
     }
 
+    public function testSelectedEntryIsDeletedWithoutDeletingItsParent(): void
+    {
+        $patch_base_index = $this->write_index('base.jsonl', [
+            'parent/selected.txt' => $this->entry('parent/selected.txt'),
+        ]);
+        $patch_result_index = $this->write_index('result.jsonl', []);
+        $planner = FileSyncPatchPlanner::create(
+            $patch_base_index,
+            $patch_result_index,
+            $this->active_deletion_roots_file(),
+            ['parent/selected.txt']
+        );
+
+        $this->assertSame(
+            [$this->delete_operation('parent/selected.txt')],
+            $this->collect_operations($planner)
+        );
+        $planner->close();
+    }
+
     public function testResumeKeepsAnActiveDeletionRootAcrossASibling(): void
     {
         $patch_base_index = $this->write_index('base.jsonl', [

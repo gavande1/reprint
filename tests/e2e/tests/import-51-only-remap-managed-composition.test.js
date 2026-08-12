@@ -5,7 +5,7 @@
  * site" flow, plus the scoped re-sync that follows it. It exercises the v1
  * invocation —
  *
- *   files-pull --intent=copy-changes --include :wp-content: \
+ *   files-pull --sync=catch-up --include :wp-content: \
  *     --remap :wp-content: :fs-root:/wp-content \
  *     --on-fs-root-nonempty=preserve-local --no-follow-symlinks
  *
@@ -111,7 +111,7 @@ describe('Import: --include + --remap onto a managed Atomic docroot', () => {
     // Shared remap + preserve flags; the --include scope varies per run.
     const remap = ['--remap', ':wp-content:', ':fs-root:/wp-content'];
     const preserve = [
-        '--intent=copy-changes',
+        '--sync=catch-up',
         '--on-fs-root-nonempty=preserve-local',
         '--no-follow-symlinks',
     ];

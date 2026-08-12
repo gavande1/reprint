@@ -302,7 +302,7 @@ class Pull
                 $state->fetch = new FetchListProgressState();
                 $state->files_pull_summary = new FilesPullSummaryState();
                 $state->files_pull_path_selection_fingerprint = null;
-                $state->reset_files_pull_intent_progress();
+                $state->reset_files_pull_sync_progress();
                 $this->client->save_state();
                 foreach ([
                     "{$pull_state_directory}/remote-index.next.jsonl",
@@ -812,7 +812,7 @@ class Pull
             $state->diff = new FileDiffProgressState();
             $state->fetch = new FetchListProgressState();
             $state->files_pull_summary = new FilesPullSummaryState();
-            $state->reset_files_pull_intent_progress();
+            $state->reset_files_pull_sync_progress();
         }
         if ($reset_file_selection_state) {
             $state->index = new RemoteFileIndexCursorState();
