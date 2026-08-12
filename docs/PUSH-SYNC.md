@@ -115,7 +115,8 @@ local changes under the selected paths, then downloads the remote values.
 `--sync=catch-up` leaves local changes alone and applies only changes made on
 the remote since the last completed pull.
 
-Mirror uses `PushPlan` to build a fresh local index. It then gives
+Mirror uses the same `FreshLocalIndexProcessor` as `PushPlan` to build a fresh
+local index. It then gives
 `FileSyncPatchPlanner` the fresh local index as the patch base and the retained
 local index as the patch result. This reverses local changes made since the
 last sync. The planner handles file changes, type changes, sparse directories,
@@ -377,10 +378,12 @@ may stop after any true return and close the sender. If the process stops
 without closing, the next process uses the preceding sender boundary and
 receiver-confirmed cursors to account for later remote work.
 
-During PushPlan's internal `indexing` phase, the plan retains one
-`FileIndexProcessor` and the open fresh local index across steps. A
-newly opened plan truncates that file to the byte offset stored with the
-processor cursor before continuing. The sender lazily opens
+During PushPlan's internal `indexing` phase, it retains one
+`FreshLocalIndexProcessor`. That processor retains `FileIndexProcessor` and
+the open fresh local index across steps. A resumed traversal truncates that
+file to the stored byte offset. PushPlan stores a separate
+`sorting_fresh_local_index` boundary before sorting changes the index byte
+order. The sender lazily opens
 `local_paths_to_push.jsonl`, `local_paths_to_delete`, and the current local file.
 It retains those handles across `next_step()` calls, lets each handle advance
 with the work, and seeks only when a newly opened or receiver-confirmed offset
@@ -389,8 +392,9 @@ remaining handles before `close()` returns.
 
 The sender stores the mandatory preflight document root, creates the push session,
 and stores its exclusion policy before it starts PushPlan. Each internal
-`indexing` step completes one traversal event, and `starting_diff` initializes
-the index diff. Each internal `diffing` step compares at most one path and
+`indexing` step completes one traversal event,
+`sorting_fresh_local_index` sorts the completed index, and `starting_diff`
+initializes the index diff. Each internal `diffing` step compares at most one path and
 updates the path lists. One sender step runs at most 256 internal steps from
 the current phase before flushing their output and storing the complete
 PushPlan cursor in `sender.json`. PushPlan owns the meaning of its file-index

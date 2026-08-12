@@ -57,19 +57,7 @@ final class PullMirrorReconciliationTest extends TestCase
             $this->remoteIndexEntry('/stable.txt', 6),
         ]);
 
-        for ($attempt = 0; $attempt < 10; ++$attempt) {
-            if ($this->call($client, 'build_fresh_local_index')) {
-                break;
-            }
-        }
-        $this->assertLessThan(10, $attempt);
-        $this->call($client, 'map_next_remote_index_to_local_paths');
-        for ($attempt = 0; $attempt < 10; ++$attempt) {
-            if ($this->call($client, 'apply_mirror_operations')) {
-                break;
-            }
-        }
-        $this->assertLessThan(10, $attempt);
+        $this->runMirror($client);
 
         $this->assertFileDoesNotExist($this->filesystemRoot . '/edited.txt');
         $this->assertFileDoesNotExist($this->filesystemRoot . '/local-only.txt');
@@ -106,13 +94,7 @@ final class PullMirrorReconciliationTest extends TestCase
             $this->remoteIndexEntry('/selected/edited.txt', 3),
         ]);
 
-        while (!$this->call($client, 'build_fresh_local_index')) {
-            continue;
-        }
-        $this->call($client, 'map_next_remote_index_to_local_paths');
-        while (!$this->call($client, 'apply_mirror_operations')) {
-            continue;
-        }
+        $this->runMirror($client);
 
         $this->assertFileDoesNotExist($this->filesystemRoot . '/selected/edited.txt');
         $this->assertFileDoesNotExist($this->filesystemRoot . '/selected/local-only.txt');
@@ -140,13 +122,7 @@ final class PullMirrorReconciliationTest extends TestCase
             $this->remoteIndexEntry('/tree/child.txt', 12),
         ]);
 
-        while (!$this->call($client, 'build_fresh_local_index')) {
-            continue;
-        }
-        $this->call($client, 'map_next_remote_index_to_local_paths');
-        while (!$this->call($client, 'apply_mirror_operations')) {
-            continue;
-        }
+        $this->runMirror($client);
 
         $this->assertFileDoesNotExist($this->filesystemRoot . '/tree');
         $this->assertSame(['/tree/child.txt'], $this->readFetchList($client));
@@ -176,13 +152,7 @@ final class PullMirrorReconciliationTest extends TestCase
             $this->remoteIndexEntry('/tree/child.txt', 12),
         ]);
 
-        while (!$this->call($client, 'build_fresh_local_index')) {
-            continue;
-        }
-        $this->call($client, 'map_next_remote_index_to_local_paths');
-        while (!$this->call($client, 'apply_mirror_operations')) {
-            continue;
-        }
+        $this->runMirror($client);
 
         $this->assertFileDoesNotExist($this->filesystemRoot . '/tree');
         $this->assertFileDoesNotExist($this->filesystemRoot . '/tree-other.txt');
@@ -262,14 +232,74 @@ final class PullMirrorReconciliationTest extends TestCase
         return $this->stateDirectory . '/remotes/' . md5('https://source.example/export.php');
     }
 
+    private function runMirror(\ImportClient $client): void
+    {
+        $mapRemotePath = fn(string $path): string => $this->call(
+            $client,
+            'map_remote_absolute_path_to_local_absolute_path',
+            [$path]
+        );
+        $pathIsSelected = fn(string $path): bool => $this->call(
+            $client,
+            'is_selected_for_pulling',
+            [$path, true]
+        );
+        $removeLocalPath = fn(string $path): bool => $this->call(
+            $client,
+            'remove_local_absolute_path_without_following_symlinks',
+            [$path]
+        );
+        $appendFetchPath = fn(string $path, $handle) => $this->call(
+            $client,
+            'append_to_fetch_list',
+            [$path, $handle]
+        );
+        $cursor = null;
+        $stepCount = 0;
+        do {
+            $processor = $cursor === null
+                ? \PullMirrorProcessor::create(
+                    $this->property($client, 'files_pull_mirror_plan_directory'),
+                    $this->property($client, 'filesystem_root'),
+                    $this->property($client, 'local_index_file'),
+                    $this->property($client, 'next_remote_index_file'),
+                    $this->property($client, 'fetch_list_file'),
+                    $this->stateDirectory,
+                    $this->property($client, 'pull_only_files_with_path_prefixes'),
+                    $this->property($client, 'pull_excluded_files_with_path_prefixes'),
+                    $mapRemotePath,
+                    $pathIsSelected,
+                    $removeLocalPath,
+                    $appendFetchPath
+                )
+                : \PullMirrorProcessor::resume(
+                    $cursor,
+                    $mapRemotePath,
+                    $pathIsSelected,
+                    $removeLocalPath,
+                    $appendFetchPath
+                );
+            try {
+                $hasNextStep = $processor->next_step();
+                $processor->flush_pending_outputs();
+                $cursor = $processor->get_cursor();
+            } finally {
+                $processor->close();
+            }
+            $this->assertLessThan(1000, ++$stepCount, 'Mirror processor did not complete.');
+        } while ($hasNextStep);
+    }
+
     private function property(object $target, string $property)
     {
         return ( new \ReflectionClass($target) )->getProperty($property)->getValue($target);
     }
 
-    private function call(object $target, string $method)
+    private function call(object $target, string $method, array $arguments = [])
     {
-        return ( new \ReflectionClass($target) )->getMethod($method)->invoke($target);
+        return ( new \ReflectionClass($target) )
+            ->getMethod($method)
+            ->invokeArgs($target, $arguments);
     }
 
     private function removeTree(string $path): void

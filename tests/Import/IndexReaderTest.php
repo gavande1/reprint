@@ -9,14 +9,14 @@ use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
-final class RemoteIndexReaderTest extends TestCase
+final class IndexReaderTest extends TestCase
 {
     private string $root;
 
     protected function setUp(): void
     {
         $this->root = sys_get_temp_dir()
-            . '/remote-index-reader-'
+            . '/index-reader-'
             . bin2hex(random_bytes(6));
         mkdir($this->root, 0700, true);
     }
@@ -42,7 +42,7 @@ final class RemoteIndexReaderTest extends TestCase
                 . "\n"
         );
 
-        $reader = new \RemoteIndexReader($remoteIndexPath);
+        $reader = new \IndexReader($remoteIndexPath);
         $reader->open();
 
         $this->assertSame(
@@ -69,13 +69,45 @@ final class RemoteIndexReaderTest extends TestCase
 
     public function testMissingFileIsAnEmptyReaderAtByteOffsetZero(): void
     {
-        $reader = new \RemoteIndexReader($this->root . '/missing.jsonl');
+        $reader = new \IndexReader($this->root . '/missing.jsonl');
         $reader->open();
 
         $this->assertNull($reader->next_entry());
         $this->assertSame(0, $reader->byte_offset());
 
         $reader->close();
+        $reader->close();
+    }
+
+    public function testReadsLocalPathAndMappedRemotePath(): void
+    {
+        $indexPath = $this->root . '/mapped-local-index.jsonl';
+        file_put_contents(
+            $indexPath,
+            json_encode([
+                'path' => base64_encode('wp-content/index.php'),
+                'remote_absolute_path' =>
+                    base64_encode('/srv/site/wp-content/index.php'),
+                'ctime' => 10,
+                'size' => 5,
+                'type' => 'file',
+                'selected' => true,
+            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n"
+        );
+
+        $reader = new \IndexReader($indexPath);
+        $reader->open();
+        $this->assertSame(
+            [
+                'path' => 'wp-content/index.php',
+                'remote_absolute_path' => '/srv/site/wp-content/index.php',
+                'ctime' => 10,
+                'size' => 5,
+                'type' => 'file',
+                'selected' => true,
+            ],
+            $reader->next_entry()
+        );
         $reader->close();
     }
 
@@ -89,14 +121,14 @@ final class RemoteIndexReaderTest extends TestCase
                 . $this->indexLine('/site/third.txt', 30, 7, 'file') . "\n"
         );
 
-        $firstReader = new \RemoteIndexReader($remoteIndexPath);
+        $firstReader = new \IndexReader($remoteIndexPath);
         $firstReader->open();
         $firstEntry = $firstReader->next_entry();
         $secondEntry = $firstReader->next_entry();
         $byteOffset = $firstReader->byte_offset();
         $firstReader->close();
 
-        $resumedReader = new \RemoteIndexReader($remoteIndexPath);
+        $resumedReader = new \IndexReader($remoteIndexPath);
         $resumedReader->open();
         $resumedReader->seek_to_byte_offset($byteOffset);
         $thirdEntry = $resumedReader->next_entry();
@@ -123,7 +155,7 @@ final class RemoteIndexReaderTest extends TestCase
                 . "\n"
         );
 
-        $reader = new \RemoteIndexReader($remoteIndexPath);
+        $reader = new \IndexReader($remoteIndexPath);
         $reader->open();
         try {
             $reader->next_entry();

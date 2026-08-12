@@ -56,9 +56,9 @@ local relative path to a document-root-relative path.
   state directory. Files-pull advances only the entries for completed local
   mutations; files-push atomically replaces the local index only after the
   target confirms commit. Use `$local_index_file`.
-- A **fresh local index** is the current filesystem-root scan created by a
-  `PushPlan` for files-push, files-diff, or mirror files-pull. Use
-  `$fresh_local_index_file`.
+- A **fresh local index** is the current filesystem-root scan created by
+  `FreshLocalIndexProcessor` for files-push, files-diff, or mirror files-pull.
+  Use `$fresh_local_index_file`.
 - A **mapped next local index** is the selected next remote index projected
   into sorted local relative paths for a mirror files-pull. Use
   `$next_local_index_file`.
@@ -534,10 +534,8 @@ Use these names verbatim inside `PushPlan`:
 | Index entry and shape | `$index_entry`, `$local_index_entry`, `$local_index_entry_shape`, `index_entry_shape()` |
 | Cursor | `$cursor`, `get_cursor()` |
 | Plan-owned excluded paths | `$excluded_paths_file` |
-| Fresh local index processor | `$file_index_processor`, `next_file_index_step()` |
-| Fresh local indexing cursor | `IndexingCursor`, `file_index_cursor` |
-| Fresh local index byte offset | `$fresh_local_index_byte_offset` |
-| Open fresh local index | `$fresh_local_index_handle` |
+| Fresh local index processor | `$fresh_local_index_processor`, `next_file_index_step()` |
+| Fresh local indexing cursor | `FreshLocalIndexCursor`, `fresh_local_index_cursor` |
 | Combined index bytes | `$index_bytes_total` |
 | File-sync planner cursor | `file_sync_planner_cursor`, `$file_sync_planner_cursor` |
 | Plan progress | `get_progress()` |

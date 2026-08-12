@@ -5,6 +5,8 @@ use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\write_local_index_update;
 use function WordPress\Reprint\Exporter\relative_path_under;
 
+require_once __DIR__ . '/../index/class-index-reader.php';
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI filesystem paths, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
@@ -358,7 +360,7 @@ class PullIndexJournal
             "INDEX MERGE START | merging pull index WAL into {$this->remote_index_path}",
         );
 
-        $remote_index_reader = new RemoteIndexReader($this->remote_index_path);
+        $remote_index_reader = new IndexReader($this->remote_index_path);
         $remote_index_reader->open();
         $pull_index_wal_file_handle = fopen($this->pull_index_wal_path, "r");
         $remote_index_replacement_file_handle = fopen($remote_index_replacement_file, "w");
