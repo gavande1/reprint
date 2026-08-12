@@ -58,7 +58,7 @@ final class PullIntentReconciliationTest extends TestCase
         ]);
 
         for ($attempt = 0; $attempt < 10; ++$attempt) {
-            if ($this->call($client, 'advance_files_pull_local_plan')) {
+            if ($this->call($client, 'build_fresh_local_index')) {
                 break;
             }
         }
@@ -106,7 +106,7 @@ final class PullIntentReconciliationTest extends TestCase
             $this->remoteIndexEntry('/selected/edited.txt', 3),
         ]);
 
-        while (!$this->call($client, 'advance_files_pull_local_plan')) {
+        while (!$this->call($client, 'build_fresh_local_index')) {
             continue;
         }
         $this->call($client, 'build_next_local_index_file');
@@ -140,7 +140,7 @@ final class PullIntentReconciliationTest extends TestCase
             $this->remoteIndexEntry('/tree/child.txt', 12),
         ]);
 
-        while (!$this->call($client, 'advance_files_pull_local_plan')) {
+        while (!$this->call($client, 'build_fresh_local_index')) {
             continue;
         }
         $this->call($client, 'build_next_local_index_file');
@@ -176,7 +176,7 @@ final class PullIntentReconciliationTest extends TestCase
             $this->remoteIndexEntry('/tree/child.txt', 12),
         ]);
 
-        while (!$this->call($client, 'advance_files_pull_local_plan')) {
+        while (!$this->call($client, 'build_fresh_local_index')) {
             continue;
         }
         $this->call($client, 'build_next_local_index_file');

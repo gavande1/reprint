@@ -201,7 +201,7 @@ class ImportClient
     /** @var float Minimum seconds between progress output lines. */
     private $progress_throttle = 1.0;
 
-    /** @var string Retained filesystem-root snapshot for this remote state directory. */
+    /** @var string Local baseline advanced by completed pulls and target-confirmed pushes. */
     private $local_index_file;
 
     /** @var string Remote index for pull operations accounted for in the filesystem root. */
@@ -338,7 +338,7 @@ class ImportClient
     private $filter = "none";
 
     /** @var string Whether files-pull copies remote changes or makes selected paths identical. */
-    private $files_pull_intent = "copy-changes";
+    private $files_pull_intent = "make-identical";
 
     /** @var string|null Extra remote directory to include in the export (--extra-directory). */
     private $extra_directory = null;
@@ -865,7 +865,7 @@ class ImportClient
         $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
 
         if (in_array($command, ["pull", "pull-files", "files-pull"], true)) {
-            $this->files_pull_intent = $options["intent"] ?? "copy-changes";
+            $this->files_pull_intent = $options["intent"] ?? "make-identical";
             if (!in_array($this->files_pull_intent, ["copy-changes", "make-identical"], true)) {
                 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option value, never HTML output.
                 throw new InvalidArgumentException(
@@ -2960,7 +2960,7 @@ class ImportClient
             $current_status !== null &&
             $current_status !== "complete";
 
-        $previous_intent = $this->get_state()->files_pull_intent ?? "copy-changes";
+        $previous_intent = $this->get_state()->files_pull_intent ?? "make-identical";
         if ($has_progress && $previous_intent !== $this->files_pull_intent) {
             // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option values, never HTML output.
             throw new RuntimeException(
@@ -3014,10 +3014,19 @@ class ImportClient
             [".", ".."]
         )) === 0;
 
-        // A local index or non-empty remote index means a prior pull completed.
-        // The local index also marks a completed empty remote tree.
-        // Copy-changes applies the next remote-index delta. Make-identical also
-        // reconciles changes found by a current local scan.
+        // The two indexes are baselines for different comparisons.
+        //
+        // The remote index says what the remote tree contained after the last
+        // completed pull. Copy-changes compares it with the current remote
+        // tree and applies only the remote changes.
+        //
+        // The local index is not a scan of the current filesystem. It records
+        // local paths after completed pulls and target-confirmed pushes for
+        // this remote. Make-identical compares that baseline with a fresh local
+        // scan, then replaces any local changes from the current remote tree.
+        //
+        // An empty local index still proves that a sync completed. Without it,
+        // an empty remote index would look exactly like no previous sync.
         $is_delta =
             is_file($this->local_index_file) ||
             (
@@ -3143,7 +3152,7 @@ class ImportClient
             $this->sort_next_remote_index_file();
             $this->get_state()->active_resumable_command->current_stage =
                 $this->files_pull_intent === "make-identical" && is_file($this->local_index_file)
-                    ? "local-plan"
+                    ? "fresh-local-index"
                     : "diff";
             $this->get_state()->diff = new FileDiffProgressState();
             if (file_exists($this->fetch_list_file)) {
@@ -3156,8 +3165,8 @@ class ImportClient
             $stage = $this->get_state()->active_resumable_command->current_stage;
         }
 
-        if ($stage === "local-plan") {
-            $complete = $this->advance_files_pull_local_plan();
+        if ($stage === "fresh-local-index") {
+            $complete = $this->build_fresh_local_index();
             if (!$complete) {
                 $this->get_state()->active_resumable_command->completion_state = "partial";
                 $this->save_state();
@@ -3289,7 +3298,7 @@ class ImportClient
     }
 
     /** Builds the fresh local index through bounded PushPlan steps. */
-    private function advance_files_pull_local_plan(): bool
+    private function build_fresh_local_index(): bool
     {
         $files_pull_plan_cursor = $this->get_state()->files_pull_plan_cursor;
         $push_plan_cursor = $files_pull_plan_cursor["push_plan_cursor"] ?? null;
@@ -11850,7 +11859,7 @@ if (
             'target' => 'intent',
             'placeholder' => 'INTENT',
             'valid_values' => ['copy-changes', 'make-identical'],
-            'help' => 'Pull intent (copy-changes|make-identical; default: copy-changes)',
+            'help' => 'Pull intent (copy-changes|make-identical; default: make-identical)',
             'commands' => ['pull', 'pull-files', 'files-pull'],
         ],
         [
