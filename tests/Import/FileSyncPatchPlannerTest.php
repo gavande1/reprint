@@ -151,7 +151,23 @@ final class FileSyncPatchPlannerTest extends TestCase
             ['selected/excluded']
         );
 
-        $operations = $this->collect_operations($planner);
+        $operations = [];
+        $path_selection = [];
+        while ($planner->next_path()) {
+            $operations[] = $planner->get_operation();
+            $path_selection[$planner->get_path()] =
+                $planner->is_path_selected();
+        }
+        $this->assertSame(
+            [
+                'outside/added.txt' => false,
+                'outside/deleted.txt' => false,
+                'selected/copied.txt' => true,
+                'selected/delete.txt' => true,
+                'selected/excluded/added.txt' => false,
+            ],
+            $path_selection
+        );
         $this->assertSame(
             [
                 null,

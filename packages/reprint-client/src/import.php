@@ -3081,6 +3081,7 @@ class ImportClient
 
         $this->pull_index_journal->open();
         $stage = $this->get_state()->active_resumable_command->current_stage ?? "index";
+        $fetch_stage_started = false;
 
         if ($stage === "index") {
             $complete = $this->fetch_next_remote_index();
@@ -3112,40 +3113,274 @@ class ImportClient
 
         if ($stage === "mirror") {
             $mirror_cursor = $this->get_state()->files_pull_mirror_cursor;
-            $map_remote_path = fn(string $path): string => $this->map_remote_absolute_path_to_local_absolute_path($path);
-            $path_is_selected = fn(string $path): bool => $this->is_selected_for_pulling($path, true);
+            $fresh_local_index_file = wp_join_unix_paths(
+                $this->files_pull_mirror_plan_directory,
+                "fresh-local-index.jsonl"
+            );
+            $local_drift_remote_paths_file = wp_join_unix_paths(
+                $this->files_pull_mirror_plan_directory,
+                "local-drift-remote-paths.jsonl"
+            );
+            $added_local_paths_file = wp_join_unix_paths(
+                $this->files_pull_mirror_plan_directory,
+                "added-local-paths.jsonl"
+            );
+            $matched_added_local_paths_file = wp_join_unix_paths(
+                $this->files_pull_mirror_plan_directory,
+                "matched-added-local-paths.jsonl"
+            );
+            $fresh_local_index = null;
             if ($mirror_cursor === null) {
                 $this->remove_local_plan_directory($this->files_pull_mirror_plan_directory);
                 mkdir($this->files_pull_mirror_plan_directory, 0755, true);
+                file_put_contents($local_drift_remote_paths_file, "");
+                file_put_contents($added_local_paths_file, "");
+                file_put_contents($matched_added_local_paths_file, "");
+                $fresh_local_index = FreshLocalIndexProcessor::create(
+                    $this->files_pull_mirror_plan_directory,
+                    $this->filesystem_root,
+                    $fresh_local_index_file
+                );
+                $mirror_cursor = [
+                    "phase" => "fresh-local-index",
+                    "processor" => $fresh_local_index->get_cursor(),
+                ];
+            } elseif ($mirror_cursor["phase"] === "fresh-local-index") {
+                $fresh_local_index = FreshLocalIndexProcessor::resume(
+                    $mirror_cursor["processor"]
+                );
             }
-            $mirror = $mirror_cursor === null
-                ? PushPlan::start_mirror(
-                    $this->files_pull_mirror_plan_directory, $this->filesystem_root, $this->local_index_file,
-                    $this->next_remote_index_file, $this->fetch_list_file, $this->state_dir, $this->pull_only_files_with_path_prefixes,
-                    $this->pull_excluded_files_with_path_prefixes, $map_remote_path, $path_is_selected
-                )
-                : PushPlan::resume($mirror_cursor, $map_remote_path, $path_is_selected);
-            $has_next_mirror_step = true;
-            try {
-                while (!$this->shutdown_requested && $has_next_mirror_step) {
-                    $has_next_mirror_step = $mirror->next_step();
-                    $operation = $mirror->get_operation();
-                    if ($operation !== null && !$this->remove_local_absolute_path_without_following_symlinks(wp_join_unix_paths(
-                        $this->filesystem_root, $operation["path"]
-                    ))) {
-                        throw new RuntimeException("Failed to remove local path before mirroring it: {$operation["path"]}.");
+            if ($mirror_cursor["phase"] === "fresh-local-index") {
+                if (!$fresh_local_index instanceof FreshLocalIndexProcessor) {
+                    throw new LogicException("Missing fresh local index processor.");
+                }
+                try {
+                    while (
+                        !$this->shutdown_requested
+                        && $fresh_local_index->next_step()
+                    ) {
+                        $fresh_local_index->flush_pending_output();
+                        $mirror_cursor["processor"] =
+                            $fresh_local_index->get_cursor();
+                        $this->get_state()->files_pull_mirror_cursor =
+                            $mirror_cursor;
+                        $this->save_state();
                     }
-                    $mirror->flush_pending_outputs();
-                    $this->get_state()->files_pull_mirror_cursor = $mirror->get_cursor();
+                    if ($this->shutdown_requested) {
+                        $this->get_state()->active_resumable_command->completion_state = "partial";
+                        $this->get_state()->files_pull_mirror_cursor =
+                            $mirror_cursor;
+                        $this->save_state();
+                        return;
+                    }
+                } finally {
+                    $fresh_local_index->close();
+                }
+                $included_index_path_roots = [];
+                foreach ($this->pull_only_files_with_path_prefixes as $remote_root) {
+                    $included_index_path_roots[] = relative_path_under(
+                        $this->map_remote_absolute_path_to_local_absolute_path(
+                            $remote_root
+                        ),
+                        $this->filesystem_root
+                    );
+                }
+                if ($included_index_path_roots === []) {
+                    $included_index_path_roots[] = "";
+                }
+                $excluded_index_path_roots = [];
+                foreach ($this->pull_excluded_files_with_path_prefixes as $remote_root) {
+                    $excluded_index_path_roots[] = relative_path_under(
+                        $this->map_remote_absolute_path_to_local_absolute_path(
+                            $remote_root
+                        ),
+                        $this->filesystem_root
+                    );
+                }
+                $state_root = relative_path_under(
+                    $this->state_dir,
+                    $this->filesystem_root
+                );
+                if ($state_root !== null) {
+                    $excluded_index_path_roots[] = $state_root;
+                }
+                $local_drift = FileSyncPatchPlanner::create(
+                    $this->local_index_file,
+                    $fresh_local_index_file,
+                    wp_join_unix_paths(
+                        $this->files_pull_mirror_plan_directory,
+                        "active-deletion-roots.jsonl"
+                    ),
+                    $included_index_path_roots,
+                    $excluded_index_path_roots
+                );
+                $mirror_cursor = [
+                    "phase" => "local-drift",
+                    "processor" => $local_drift->get_cursor(),
+                    "remote_paths_byte_offset" => 0,
+                    "added_paths_byte_offset" => 0,
+                ];
+            } else {
+                $local_drift = FileSyncPatchPlanner::resume(
+                    $mirror_cursor["processor"]
+                );
+            }
+            $local_drift_remote_paths_handle = fopen(
+                $local_drift_remote_paths_file,
+                "c+b"
+            );
+            $added_local_paths_handle = fopen($added_local_paths_file, "c+b");
+            if (
+                !is_resource($local_drift_remote_paths_handle)
+                || !is_resource($added_local_paths_handle)
+                || !ftruncate(
+                    $local_drift_remote_paths_handle,
+                    $mirror_cursor["remote_paths_byte_offset"]
+                )
+                || !ftruncate(
+                    $added_local_paths_handle,
+                    $mirror_cursor["added_paths_byte_offset"]
+                )
+                || fseek(
+                    $local_drift_remote_paths_handle,
+                    $mirror_cursor["remote_paths_byte_offset"]
+                ) !== 0
+                || fseek(
+                    $added_local_paths_handle,
+                    $mirror_cursor["added_paths_byte_offset"]
+                ) !== 0
+            ) {
+                if (is_resource($local_drift_remote_paths_handle)) {
+                    fclose($local_drift_remote_paths_handle);
+                }
+                if (is_resource($added_local_paths_handle)) {
+                    fclose($added_local_paths_handle);
+                }
+                $local_drift->close();
+                throw new RuntimeException("Failed to resume the local-drift path lists.");
+            }
+            try {
+                while (
+                    !$this->shutdown_requested
+                    && $local_drift->next_path()
+                ) {
+                    $local_path_transition =
+                        $local_drift->get_path_transition();
+                    if (
+                        !$local_drift->is_path_selected()
+                        || $local_path_transition === "unchanged"
+                    ) {
+                        continue;
+                    }
+                    $local_relative_path = $local_drift->get_path();
+                    $local_absolute_path = wp_join_unix_paths(
+                        $this->filesystem_root,
+                        $local_relative_path
+                    );
+                    $remote_path_candidates = [
+                        wp_join_unix_paths("/", $local_relative_path),
+                    ];
+                    foreach ($this->resolved_path_mappings as $remote_root => $local_root) {
+                        $remainder = path_remainder_under(
+                            $local_absolute_path,
+                            $local_root
+                        );
+                        if ($remainder !== null) {
+                            $remote_path_candidates[] = wp_join_unix_paths(
+                                $remote_root,
+                                $remainder
+                            );
+                        }
+                    }
+                    if ($this->local_followed_symlinks_root !== null) {
+                        $remainder = path_remainder_under(
+                            $local_absolute_path,
+                            $this->local_followed_symlinks_root
+                        );
+                        if ($remainder !== null) {
+                            $remote_path_candidates[] = wp_join_unix_paths(
+                                "/",
+                                $remainder
+                            );
+                        }
+                    }
+                    foreach (array_unique($remote_path_candidates) as $remote_path) {
+                        if (
+                            $this->map_remote_absolute_path_to_local_absolute_path(
+                                $remote_path
+                            ) !== $local_absolute_path
+                            || !$this->is_selected_for_pulling($remote_path, false)
+                        ) {
+                            continue;
+                        }
+                        $line = json_encode(
+                            [
+                                "path" => base64_encode($remote_path),
+                                "local_relative_path_b64" =>
+                                    base64_encode($local_relative_path),
+                                "added_locally" =>
+                                    $local_path_transition === "added",
+                            ],
+                            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+                        ) . "\n";
+                        if (
+                            fwrite($local_drift_remote_paths_handle, $line)
+                            !== strlen($line)
+                        ) {
+                            throw new RuntimeException("Failed to write the local-drift path list.");
+                        }
+                    }
+                    if ($local_path_transition === "added") {
+                        $line = json_encode(
+                            [
+                                "path" => base64_encode($local_relative_path),
+                                "type" => "file",
+                                "size" => 0,
+                                "ctime" => 0,
+                            ],
+                            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+                        ) . "\n";
+                        if (
+                            fwrite($added_local_paths_handle, $line)
+                            !== strlen($line)
+                        ) {
+                            throw new RuntimeException("Failed to write the added local path list.");
+                        }
+                    }
+                    $local_drift->flush_pending_outputs();
+                    if (
+                        !fflush($local_drift_remote_paths_handle)
+                        || !fflush($added_local_paths_handle)
+                    ) {
+                        throw new RuntimeException("Failed to flush the local-drift path lists.");
+                    }
+                    $mirror_cursor = [
+                        "phase" => "local-drift",
+                        "processor" => $local_drift->get_cursor(),
+                        "remote_paths_byte_offset" =>
+                            ftell($local_drift_remote_paths_handle),
+                        "added_paths_byte_offset" =>
+                            ftell($added_local_paths_handle),
+                    ];
+                    $this->get_state()->files_pull_mirror_cursor =
+                        $mirror_cursor;
                     $this->save_state();
                 }
             } finally {
-                $mirror->close();
+                fclose($local_drift_remote_paths_handle);
+                fclose($added_local_paths_handle);
+                $local_drift->close();
             }
-            if ($has_next_mirror_step) {
+            if ($this->shutdown_requested) {
                 $this->get_state()->active_resumable_command->completion_state = "partial";
                 $this->save_state();
                 return;
+            }
+            if (
+                !sort_index_file($local_drift_remote_paths_file)
+                || !sort_index_file($added_local_paths_file)
+            ) {
+                throw new RuntimeException("Failed to sort the local-drift path lists.");
             }
             $this->get_state()->active_resumable_command->current_stage = "diff";
             $this->get_state()->diff = new FileDiffProgressState();
@@ -3161,39 +3396,130 @@ class ImportClient
                 return;
             }
 
-            if ($this->files_pull_sync === "mirror") {
-                sort_index_file($this->fetch_list_file);
+            $added_local_paths_file = wp_join_unix_paths(
+                $this->files_pull_mirror_plan_directory,
+                "added-local-paths.jsonl"
+            );
+            if (
+                $this->files_pull_sync === "mirror"
+                && is_file($added_local_paths_file)
+                && filesize($added_local_paths_file) > 0
+            ) {
+                $cleanup = FileIndexDiffProcessor::create(
+                    $added_local_paths_file,
+                    wp_join_unix_paths(
+                        $this->files_pull_mirror_plan_directory,
+                        "matched-added-local-paths.sorted.jsonl"
+                    )
+                );
+                $this->get_state()->files_pull_mirror_cursor = [
+                    "phase" => "cleanup",
+                    "processor" => $cleanup->get_cursor(),
+                ];
+                $cleanup->close();
+                $stage = "cleanup";
+            } else {
+                $stage = file_exists($this->fetch_list_file)
+                    && filesize($this->fetch_list_file) > 0
+                    ? "fetch"
+                    : null;
+                $fetch_stage_started = $stage === "fetch";
             }
-            $has_files_to_fetch =
-                file_exists($this->fetch_list_file) &&
-                filesize($this->fetch_list_file) > 0;
-            $stage = $has_files_to_fetch ? "fetch" : null;
             $this->get_state()->active_resumable_command->current_stage = $stage;
             $this->save_state();
+        }
 
-            // In pull mode, finalize the scanning line with a checkmark
-            // and start the download progress on a fresh line.
-            if ($has_files_to_fetch && $this->progress->is_mode('pipeline')) {
-                $green = "\033[32m";
-                $dim = "\033[2m";
-                $r = "\033[0m";
-                $scanned = number_format($this->next_remote_index_entries_counted);
-                $this->progress->clear_progress_line();
-                $this->progress->print_line("  {$green}✓{$r} Scanned {$dim}— {$scanned} entries{$r}\n");
-                $total = $this->count_newlines($this->fetch_list_file);
-                $this->progress->set_active_label(null);
-                $this->progress->show_progress_line(
-                    "Downloading — 0 / " . number_format($total) . " files",
-                    0.0
-                );
+        if ($stage === "cleanup") {
+            $cleanup = FileIndexDiffProcessor::resume(
+                wp_join_unix_paths(
+                    $this->files_pull_mirror_plan_directory,
+                    "added-local-paths.jsonl"
+                ),
+                wp_join_unix_paths(
+                    $this->files_pull_mirror_plan_directory,
+                    "matched-added-local-paths.sorted.jsonl"
+                ),
+                $this->get_state()->files_pull_mirror_cursor["processor"]
+            );
+            $has_path = $cleanup->next_path();
+            try {
+                while ($has_path) {
+                    if (function_exists("pcntl_signal_dispatch")) {
+                        pcntl_signal_dispatch();
+                        if ($this->shutdown_requested) {
+                            break;
+                        }
+                    }
+                    if ($cleanup->get_path_transition() === "deleted") {
+                        $local_absolute_path = wp_join_unix_paths(
+                            $this->filesystem_root,
+                            $cleanup->get_path()
+                        );
+                        if (
+                            !$this->remove_local_absolute_path_without_following_symlinks(
+                                $local_absolute_path
+                            )
+                        ) {
+                            throw new RuntimeException(
+                                "Failed to remove a local-only path: "
+                                . $cleanup->get_path()
+                            );
+                        }
+                        $local_parent_path = dirname($local_absolute_path);
+                        while (
+                            $local_parent_path !== $this->filesystem_root
+                            && path_is_same_as_or_descendant_of(
+                                $local_parent_path,
+                                $this->filesystem_root
+                            )
+                            && @rmdir($local_parent_path)
+                        ) {
+                            $local_parent_path = dirname($local_parent_path);
+                        }
+                    }
+                    $has_path = $cleanup->next_path();
+                    $this->get_state()->files_pull_mirror_cursor = [
+                        "phase" => "cleanup",
+                        "processor" => $cleanup->get_cursor(),
+                    ];
+                    $this->save_state();
+                }
+            } finally {
+                $cleanup->close();
             }
+            if ($has_path) {
+                $this->get_state()->active_resumable_command->completion_state = "partial";
+                $this->save_state();
+                return;
+            }
+            $stage = file_exists($this->fetch_list_file)
+                && filesize($this->fetch_list_file) > 0
+                ? "fetch"
+                : null;
+            $fetch_stage_started = $stage === "fetch";
+            $this->get_state()->active_resumable_command->current_stage = $stage;
+            $this->save_state();
+        }
 
-            if (!$has_files_to_fetch && file_exists($this->fetch_list_file)) {
-                @unlink($this->fetch_list_file);
-                $this->audit_log(
-                    "FILE DELETE | {$this->fetch_list_file} | no files to fetch",
-                );
-            }
+        if ($fetch_stage_started && $this->progress->is_mode('pipeline')) {
+            $green = "\033[32m";
+            $dim = "\033[2m";
+            $r = "\033[0m";
+            $scanned = number_format($this->next_remote_index_entries_counted);
+            $this->progress->clear_progress_line();
+            $this->progress->print_line("  {$green}✓{$r} Scanned {$dim}— {$scanned} entries{$r}\n");
+            $total = $this->count_newlines($this->fetch_list_file);
+            $this->progress->set_active_label(null);
+            $this->progress->show_progress_line(
+                "Downloading — 0 / " . number_format($total) . " files",
+                0.0
+            );
+        }
+        if ($stage === null && file_exists($this->fetch_list_file)) {
+            @unlink($this->fetch_list_file);
+            $this->audit_log(
+                "FILE DELETE | {$this->fetch_list_file} | no files to fetch",
+            );
         }
 
         if ($stage === "fetch") {
@@ -6599,212 +6925,244 @@ class ImportClient
             throw new RuntimeException("Next remote index file not found");
         }
 
-        $file_diff_progress_state = $this->get_state()->diff;
-        $next_remote_index_byte_offset =
-            $file_diff_progress_state->next_remote_index_byte_offset;
-        $last_consumed_remote_index_entry_path =
-            $file_diff_progress_state->last_consumed_remote_index_entry_path;
-        $last_processed_next_remote_index_entry_path =
-            $file_diff_progress_state->last_processed_next_remote_index_entry_path;
-        $fetch_list_file_mode = $next_remote_index_byte_offset > 0 || ( is_file($this->fetch_list_file) && filesize($this->fetch_list_file) > 0 ) ? "a" : "w";
-        if ($fetch_list_file_mode === "w") {
-            $this->audit_log(
-                "FILE CREATE | {$this->fetch_list_file} | building fetch list",
-            );
-        } else {
-            $this->audit_log(
-                "FILE APPEND | {$this->fetch_list_file} | resuming fetch list build",
-            );
-        }
-        $fetch_list_file_handle = fopen(
-            $this->fetch_list_file,
-            $fetch_list_file_mode,
+        $progress = $this->get_state()->diff;
+        $index_diff = FileIndexDiffProcessor::resume(
+            $this->remote_index_file,
+            $this->next_remote_index_file,
+            $progress->index_diff_cursor
         );
-        if (!$fetch_list_file_handle) {
-            throw new RuntimeException("Failed to open fetch list file");
+        $fetch_list_file_handle = fopen($this->fetch_list_file, "c+b");
+        if (
+            !is_resource($fetch_list_file_handle)
+            || !ftruncate(
+                $fetch_list_file_handle,
+                $progress->fetch_list_byte_offset
+            )
+            || fseek(
+                $fetch_list_file_handle,
+                $progress->fetch_list_byte_offset
+            ) !== 0
+        ) {
+            if (is_resource($fetch_list_file_handle)) {
+                fclose($fetch_list_file_handle);
+            }
+            $index_diff->close();
+            throw new RuntimeException("Failed to resume the fetch list.");
         }
-
-        $next_remote_index_reader = new IndexReader(
-            $this->next_remote_index_file
+        $local_drift_reader = null;
+        $local_drift_entry = null;
+        $matched_added_local_paths_handle = null;
+        $local_drift_byte_offset =
+            $progress->local_drift_remote_paths_byte_offset;
+        $local_drift_file = wp_join_unix_paths(
+            $this->files_pull_mirror_plan_directory,
+            "local-drift-remote-paths.jsonl"
         );
-        try {
-            $next_remote_index_reader->open();
-            if ($next_remote_index_byte_offset > 0) {
-                $next_remote_index_reader->seek_to_byte_offset(
-                    $next_remote_index_byte_offset
-                );
-            }
-        } catch (RuntimeException $exception) {
-            $next_remote_index_reader->close();
-            fclose($fetch_list_file_handle);
-            throw $exception;
-        }
-
-        $remote_index_reader = new IndexReader($this->remote_index_file);
-        try {
-            $remote_index_reader->open();
-        } catch (RuntimeException $exception) {
-            $next_remote_index_reader->close();
-            fclose($fetch_list_file_handle);
-            throw $exception;
-        }
-        $remote_index_entry = $remote_index_reader->next_entry();
-        if ($last_consumed_remote_index_entry_path) {
-            while (
-                $remote_index_entry !== null &&
-                strcmp(
-                    $remote_index_entry["path"],
-                    $last_consumed_remote_index_entry_path,
-                ) <= 0
+        if ($this->files_pull_sync === "mirror" && is_file($local_drift_file)) {
+            $local_drift_reader = new IndexReader($local_drift_file);
+            $local_drift_reader->open();
+            $local_drift_reader->seek_to_byte_offset(
+                $local_drift_byte_offset
+            );
+            $local_drift_entry = $local_drift_reader->next_entry();
+            $matched_added_local_paths_handle = fopen(
+                wp_join_unix_paths(
+                    $this->files_pull_mirror_plan_directory,
+                    "matched-added-local-paths.jsonl"
+                ),
+                "c+b"
+            );
+            if (
+                !is_resource($matched_added_local_paths_handle)
+                || !ftruncate(
+                    $matched_added_local_paths_handle,
+                    $progress->matched_added_local_paths_byte_offset
+                )
+                || fseek(
+                    $matched_added_local_paths_handle,
+                    $progress->matched_added_local_paths_byte_offset
+                ) !== 0
             ) {
-                $remote_index_entry = $remote_index_reader->next_entry();
+                if (is_resource($matched_added_local_paths_handle)) {
+                    fclose($matched_added_local_paths_handle);
+                }
+                $local_drift_reader->close();
+                $index_diff->close();
+                fclose($fetch_list_file_handle);
+                throw new RuntimeException("Failed to resume matched added local paths.");
             }
         }
-        $this->pull_index_journal->open();
-        $next_remote_index_entries_processed = 0;
 
-        while (($next_remote_index_entry = $next_remote_index_reader->next_entry()) !== null) {
-            if ($this->shutdown_requested) {
-                break;
-            }
-
-            if (function_exists("pcntl_signal_dispatch")) {
-                pcntl_signal_dispatch();
-            }
-
-            $next_remote_index_byte_offset = $next_remote_index_reader->byte_offset();
-
-            while (
-                $remote_index_entry !== null &&
-                strcmp($remote_index_entry["path"], $next_remote_index_entry["path"]) < 0
-            ) {
-                // The remote index is a union across files-pull path selections.
-                // Keep entries outside this run's selection.
-                if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
-                    $missing_remote_index_entry_path = $remote_index_entry["path"];
-                    $remote_deletion_root = $this->derive_remote_deletion_root_from_sparse_index(
-                        $missing_remote_index_entry_path,
-                        $last_processed_next_remote_index_entry_path,
-                        $next_remote_index_entry["path"],
-                    );
-                    $local_absolute_path = $this->remove_remote_path_locally(
-                        $remote_deletion_root
-                    );
-                    if ($local_absolute_path === null) {
-                        $this->pull_index_journal->record_remote_invalidation(
-                            $missing_remote_index_entry_path
-                        );
-                    } else {
-                        $this->pull_index_journal->record_successful_deletion(
-                            $missing_remote_index_entry_path,
-                            $local_absolute_path
-                        );
+        $has_path = $index_diff->next_path();
+        $paths_processed = 0;
+        try {
+            while ($has_path) {
+                if (function_exists("pcntl_signal_dispatch")) {
+                    pcntl_signal_dispatch();
+                    if ($this->shutdown_requested) {
+                        break;
                     }
                 }
-                $last_consumed_remote_index_entry_path =
-                    $remote_index_entry["path"];
-                $remote_index_entry = $remote_index_reader->next_entry();
+                $remote_path = $index_diff->get_path();
+                $local_drift_requires_fetch = false;
+                while (
+                    $local_drift_entry !== null
+                    && strcmp($local_drift_entry["path"], $remote_path) <= 0
+                ) {
+                    if ($local_drift_entry["path"] === $remote_path) {
+                        $local_drift_requires_fetch = true;
+                        if (!empty($local_drift_entry["added_locally"])) {
+                            $line = json_encode(
+                                [
+                                    "path" => $local_drift_entry[
+                                        "local_relative_path_b64"
+                                    ],
+                                    "type" => "file",
+                                    "size" => 0,
+                                    "ctime" => 0,
+                                ],
+                                JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
+                            ) . "\n";
+                            if (
+                                fwrite($matched_added_local_paths_handle, $line)
+                                !== strlen($line)
+                            ) {
+                                throw new RuntimeException("Failed to write a matched added local path.");
+                            }
+                        }
+                    }
+                    $local_drift_byte_offset =
+                        $local_drift_reader->byte_offset();
+                    $local_drift_entry = $local_drift_reader->next_entry();
+                }
+
+                $transition = $index_diff->get_path_transition();
+                if ($transition === "deleted") {
+                    // The retained remote index also holds earlier selections.
+                    // Do not remove a path outside this run's selection.
+                    if ($this->is_selected_for_pulling($remote_path, false)) {
+                        $remote_deletion_root =
+                            $this->derive_remote_deletion_root_from_sparse_index(
+                                $remote_path,
+                                $index_diff->get_preceding_path_in_new_index(),
+                                $index_diff->get_following_path_in_new_index()
+                            );
+                        $local_absolute_path = $this->remove_remote_path_locally(
+                            $remote_deletion_root
+                        );
+                        if ($local_absolute_path === null) {
+                            $this->pull_index_journal->record_remote_invalidation(
+                                $remote_path
+                            );
+                        } else {
+                            $this->pull_index_journal->record_successful_deletion(
+                                $remote_path,
+                                $local_absolute_path
+                            );
+                        }
+                    }
+                } elseif (
+                    $transition !== "unchanged"
+                    || $local_drift_requires_fetch
+                ) {
+                    if ($this->is_selected_for_pulling($remote_path, true)) {
+                        // Preserve-local protects only paths not seen remotely before.
+                        $preserve_local_skip_reason = $transition === "added"
+                            ? $this->should_skip_for_preserve_local($remote_path)
+                            : null;
+                        if ($preserve_local_skip_reason) {
+                            $this->audit_log(
+                                $preserve_local_skip_reason,
+                                true
+                            );
+                            $this->emit_skip_progress($remote_path);
+                        } else {
+                            $this->append_to_fetch_list(
+                                $remote_path,
+                                $fetch_list_file_handle
+                            );
+                        }
+                    }
+                }
+
+                $has_path = $index_diff->next_path();
+                ++$paths_processed;
+                if ($paths_processed % 200 === 0) {
+                    if (
+                        !fflush($fetch_list_file_handle)
+                        || (
+                            is_resource($matched_added_local_paths_handle)
+                            && !fflush($matched_added_local_paths_handle)
+                        )
+                    ) {
+                        throw new RuntimeException("Failed to flush the remote diff outputs.");
+                    }
+                    $this->pull_index_journal->flush();
+                    $progress->index_diff_cursor = $index_diff->get_cursor();
+                    $progress->fetch_list_byte_offset =
+                        ftell($fetch_list_file_handle);
+                    $progress->local_drift_remote_paths_byte_offset =
+                        $local_drift_byte_offset;
+                    $progress->matched_added_local_paths_byte_offset =
+                        is_resource($matched_added_local_paths_handle)
+                            ? ftell($matched_added_local_paths_handle)
+                            : 0;
+                    $this->save_state();
+                    $this->progress->tick_spinner();
+                }
             }
 
             if (
-                $remote_index_entry !== null &&
-                $remote_index_entry["path"] === $next_remote_index_entry["path"]
-            ) {
-                if (
-                    $remote_index_entry["ctime"] !== $next_remote_index_entry["ctime"] ||
-                    $remote_index_entry["size"] !== $next_remote_index_entry["size"] ||
-                    $remote_index_entry["type"] !== $next_remote_index_entry["type"]
-                ) {
-                    // Re-download it when selected — the remote index confirms
-                    // that an earlier files-pull accounted for this path, so
-                    // preserve-local does not protect it.
-                    if ($this->is_selected_for_pulling($next_remote_index_entry["path"], true)) {
-                        $this->append_to_fetch_list(
-                            $next_remote_index_entry["path"],
-                            $fetch_list_file_handle,
-                        );
-                    }
-                }
-                $last_consumed_remote_index_entry_path =
-                    $remote_index_entry["path"];
-                $remote_index_entry = $remote_index_reader->next_entry();
-            } elseif (
-                $this->is_selected_for_pulling($next_remote_index_entry["path"], true) &&
-                (
-                    $remote_index_entry === null ||
-                    strcmp($remote_index_entry["path"], $next_remote_index_entry["path"]) > 0
+                !fflush($fetch_list_file_handle)
+                || (
+                    is_resource($matched_added_local_paths_handle)
+                    && !fflush($matched_added_local_paths_handle)
                 )
             ) {
-                $preserve_local_skip_reason =
-                    $this->should_skip_for_preserve_local(
-                        $next_remote_index_entry["path"],
-                    );
-                if ($preserve_local_skip_reason) {
-                    $this->audit_log($preserve_local_skip_reason, true);
-                    $this->emit_skip_progress($next_remote_index_entry["path"]);
-                } else {
-                    $this->append_to_fetch_list(
-                        $next_remote_index_entry["path"],
-                        $fetch_list_file_handle,
-                    );
-                }
+                throw new RuntimeException("Failed to flush the remote diff outputs.");
             }
-
-            $last_processed_next_remote_index_entry_path =
-                $next_remote_index_entry["path"];
-            $next_remote_index_entries_processed++;
-            if ($next_remote_index_entries_processed % 200 === 0) {
-                $this->get_state()->diff->next_remote_index_byte_offset = $next_remote_index_byte_offset;
-                $this->get_state()->diff->last_consumed_remote_index_entry_path =
-                    $last_consumed_remote_index_entry_path;
-                $this->get_state()->diff->last_processed_next_remote_index_entry_path =
-                    $last_processed_next_remote_index_entry_path;
-                $this->pull_index_journal->flush();
-                $this->save_state();
-                $this->progress->tick_spinner();
+            $this->pull_index_journal->flush();
+            $progress->index_diff_cursor = $index_diff->get_cursor();
+            $progress->fetch_list_byte_offset = ftell($fetch_list_file_handle);
+            $progress->local_drift_remote_paths_byte_offset =
+                $local_drift_byte_offset;
+            $progress->matched_added_local_paths_byte_offset =
+                is_resource($matched_added_local_paths_handle)
+                    ? ftell($matched_added_local_paths_handle)
+                    : 0;
+        } finally {
+            $index_diff->close();
+            if ($local_drift_reader !== null) {
+                $local_drift_reader->close();
             }
+            if (is_resource($matched_added_local_paths_handle)) {
+                fclose($matched_added_local_paths_handle);
+            }
+            fclose($fetch_list_file_handle);
         }
 
-        while ($remote_index_entry !== null) {
-            if ($this->is_selected_for_pulling($remote_index_entry["path"], false)) {
-                $missing_remote_index_entry_path = $remote_index_entry["path"];
-                $remote_deletion_root = $this->derive_remote_deletion_root_from_sparse_index(
-                    $missing_remote_index_entry_path,
-                    $last_processed_next_remote_index_entry_path,
-                    null,
-                );
-                $local_absolute_path = $this->remove_remote_path_locally(
-                    $remote_deletion_root
-                );
-                if ($local_absolute_path === null) {
-                    $this->pull_index_journal->record_remote_invalidation(
-                        $missing_remote_index_entry_path
-                    );
-                } else {
-                    $this->pull_index_journal->record_successful_deletion(
-                        $missing_remote_index_entry_path,
-                        $local_absolute_path
-                    );
-                }
+        $matched_added_local_paths_file = wp_join_unix_paths(
+            $this->files_pull_mirror_plan_directory,
+            "matched-added-local-paths.jsonl"
+        );
+        if (!$has_path && is_file($matched_added_local_paths_file)) {
+            $sorted_matched_added_local_paths_file = wp_join_unix_paths(
+                $this->files_pull_mirror_plan_directory,
+                "matched-added-local-paths.sorted.jsonl"
+            );
+            if (
+                !copy(
+                    $matched_added_local_paths_file,
+                    $sorted_matched_added_local_paths_file
+                )
+                || !sort_index_file($sorted_matched_added_local_paths_file)
+            ) {
+                throw new RuntimeException("Failed to sort matched added local paths.");
             }
-            $last_consumed_remote_index_entry_path =
-                $remote_index_entry["path"];
-            $remote_index_entry = $remote_index_reader->next_entry();
         }
-
-        $remote_index_reader->close();
-        $next_remote_index_reader->close();
-        fclose($fetch_list_file_handle);
-
-        $this->get_state()->diff->next_remote_index_byte_offset = $next_remote_index_byte_offset;
-        $this->get_state()->diff->last_consumed_remote_index_entry_path =
-            $last_consumed_remote_index_entry_path;
-        $this->get_state()->diff->last_processed_next_remote_index_entry_path =
-            $last_processed_next_remote_index_entry_path;
         $this->pull_index_journal->apply_pending_records();
         $this->save_state();
-
-        return !$this->shutdown_requested;
+        return !$has_path;
     }
 
     /**
@@ -10570,12 +10928,6 @@ class ImportClient
      */
     private function encode_state_paths(array $state): array
     {
-        $state["diff"]["last_consumed_remote_index_entry_path"] = $this->encode_state_path_value(
-            $state["diff"]["last_consumed_remote_index_entry_path"] ?? null,
-        );
-        $state["diff"]["last_processed_next_remote_index_entry_path"] = $this->encode_state_path_value(
-            $state["diff"]["last_processed_next_remote_index_entry_path"] ?? null,
-        );
         $state["fetch"]["batch_file"] = $this->encode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,
         );
@@ -10605,12 +10957,6 @@ class ImportClient
      */
     private function decode_state_paths(array $state): array
     {
-        $state["diff"]["last_consumed_remote_index_entry_path"] = $this->decode_state_path_value(
-            $state["diff"]["last_consumed_remote_index_entry_path"] ?? null,
-        );
-        $state["diff"]["last_processed_next_remote_index_entry_path"] = $this->decode_state_path_value(
-            $state["diff"]["last_processed_next_remote_index_entry_path"] ?? null,
-        );
         $state["fetch"]["batch_file"] = $this->decode_state_path_value(
             $state["fetch"]["batch_file"] ?? null,
         );

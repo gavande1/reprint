@@ -119,6 +119,15 @@ final class FileSyncPatchPlanner
     /** @var SyncOperation|null Operation selected for the current path. */
     private ?array $operation = null;
 
+    /** @var string|null Path processed by the latest successful next_path() call. */
+    private ?string $path = null;
+
+    /** @var 'added'|'modified'|'deleted'|'unchanged'|null Transition for the processed path. */
+    private ?string $path_transition = null;
+
+    /** Whether selection permits changing the processed path. */
+    private bool $path_is_selected = false;
+
     /** Whether both indexes reached EOF. */
     private bool $complete = false;
 
@@ -229,6 +238,9 @@ final class FileSyncPatchPlanner
     {
         $this->assert_open();
         $this->operation = null;
+        $this->path = null;
+        $this->path_transition = null;
+        $this->path_is_selected = false;
         if ($this->complete) {
             return false;
         }
@@ -245,6 +257,9 @@ final class FileSyncPatchPlanner
         $patch_base_path_type = $this->index_diff->get_path_type_in_old_index();
         $patch_result_path_type = $this->index_diff->get_path_type_in_new_index();
         $path_transition = $this->index_diff->get_path_transition();
+        $this->path = $index_path;
+        $this->path_transition = $path_transition;
+        $this->path_is_selected = $this->path_may_change($index_path);
         $patch_result_entry_shape = $patch_result_path_type === null
             ? null
             : $this->index_entry_shape($patch_result_path_type);
@@ -460,6 +475,41 @@ final class FileSyncPatchPlanner
     {
         $this->assert_open();
         return $this->operation;
+    }
+
+    /** Returns the path processed by the latest successful next_path() call. */
+    public function get_path(): string
+    {
+        $this->assert_open();
+        if ($this->path === null) {
+            throw new LogicException("No file-sync path has been processed.");
+        }
+        return $this->path;
+    }
+
+    /**
+     * Returns how the processed path differs between the patch indexes.
+     *
+     * @return string `added`, `modified`, `deleted`, or `unchanged`.
+     * @phpstan-return 'added'|'modified'|'deleted'|'unchanged'
+     */
+    public function get_path_transition(): string
+    {
+        $this->assert_open();
+        if ($this->path_transition === null) {
+            throw new LogicException("No file-sync path has been processed.");
+        }
+        return $this->path_transition;
+    }
+
+    /** Returns whether selection permits changing the processed path. */
+    public function is_path_selected(): bool
+    {
+        $this->assert_open();
+        if ($this->path === null) {
+            throw new LogicException("No file-sync path has been processed.");
+        }
+        return $this->path_is_selected;
     }
 
     /**

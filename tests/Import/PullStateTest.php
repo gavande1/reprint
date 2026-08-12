@@ -41,9 +41,14 @@ class PullStateTest extends TestCase
         $state->active_resumable_command->command_name = 'db-pull';
         $state->active_resumable_command->completion_state = 'complete';
         $state->pull_pipeline->started_by_command = 'pull';
-        $state->diff->next_remote_index_byte_offset = 123;
-        $state->diff->last_consumed_remote_index_entry_path = '/wp-content/index.php';
-        $state->diff->last_processed_next_remote_index_entry_path = '/wp-content/themes/twentytwenty/style.css';
+        $state->diff->index_diff_cursor = [
+            'old_index_byte_offset' => 123,
+            'new_index_byte_offset' => 456,
+            'preceding_new_index_entry_path_b64' => base64_encode(
+                '/wp-content/index.php'
+            ),
+        ];
+        $state->diff->fetch_list_byte_offset = 789;
         $state->sql_statements_counted = 99;
 
         $array = $state->to_array();
@@ -51,12 +56,11 @@ class PullStateTest extends TestCase
         $this->assertSame('db-pull', $array['active_resumable_command']['command_name']);
         $this->assertSame('complete', $array['active_resumable_command']['completion_state']);
         $this->assertSame('pull', $array['pull_pipeline']['started_by_command']);
-        $this->assertSame(123, $array['diff']['next_remote_index_byte_offset']);
-        $this->assertSame('/wp-content/index.php', $array['diff']['last_consumed_remote_index_entry_path']);
         $this->assertSame(
-            '/wp-content/themes/twentytwenty/style.css',
-            $array['diff']['last_processed_next_remote_index_entry_path']
+            $state->diff->index_diff_cursor,
+            $array['diff']['index_diff_cursor']
         );
+        $this->assertSame(789, $array['diff']['fetch_list_byte_offset']);
         $this->assertSame(99, $array['sql_statements_counted']);
     }
 
@@ -130,13 +134,12 @@ class PullStateTest extends TestCase
     public function testStateRejectsDiffFieldsFromThePreviousSchema(): void
     {
         $data = (new \PullState())->to_array();
-        unset($data['diff']['last_consumed_remote_index_entry_path']);
-        $data['diff']['last_consumed_local_index_entry_path'] =
-            '/wp-content/index.php';
+        unset($data['diff']['index_diff_cursor']);
+        $data['diff']['next_remote_index_byte_offset'] = 123;
 
         $this->expectException(\UnexpectedValueException::class);
         $this->expectExceptionMessage(
-            'missing last_consumed_remote_index_entry_path; unexpected last_consumed_local_index_entry_path'
+            'missing index_diff_cursor; unexpected next_remote_index_byte_offset'
         );
 
         \PullState::from_array($data);

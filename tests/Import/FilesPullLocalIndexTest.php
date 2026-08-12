@@ -305,6 +305,100 @@ final class FilesPullLocalIndexTest extends TestCase
         );
     }
 
+    public function testMirrorUsesTheCurrentRemoteVersionAfterBothSidesChange(): void
+    {
+        $this->completeFilesPull();
+        file_put_contents(
+            $this->localTree . '/' . self::PULLED_PATH,
+            'local edit'
+        );
+        $remoteContents = 'new remote edit';
+        $this->writeRemoteOverrides([
+            'pulled_ctime' => self::REMOTE_CTIME + 1,
+            'pulled_contents_b64' => base64_encode($remoteContents),
+        ]);
+
+        $this->abortFilesPull();
+        $pull = $this->runFilesPull();
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertSame(
+            $remoteContents,
+            file_get_contents($this->localTree . '/' . self::PULLED_PATH)
+        );
+    }
+
+    public function testMirrorRemovesOnlyLocalPathsMissingFromRemoteSubtree(): void
+    {
+        $this->writeRemoteOverrides([
+            'added_files' => [
+                'tree/remote.txt' => 'remote child',
+            ],
+        ]);
+        $this->completeFilesPull();
+        file_put_contents($this->localTree . '/tree/local.txt', 'local child');
+        file_put_contents(
+            $this->localTree . '/tree/remote.txt',
+            'local edit of remote child'
+        );
+
+        $this->abortFilesPull();
+        $pull = $this->runFilesPull();
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertFileDoesNotExist($this->localTree . '/tree/local.txt');
+        $this->assertSame(
+            'remote child',
+            file_get_contents($this->localTree . '/tree/remote.txt')
+        );
+    }
+
+    public function testMirrorRestoresRemoteDirectoryAfterLocalFileReplacesIt(): void
+    {
+        $this->writeRemoteOverrides([
+            'added_files' => [
+                'tree/child.txt' => 'remote child',
+            ],
+        ]);
+        $this->completeFilesPull();
+        unlink($this->localTree . '/tree/child.txt');
+        rmdir($this->localTree . '/tree');
+        file_put_contents($this->localTree . '/tree', 'local file');
+
+        $this->abortFilesPull();
+        $pull = $this->runFilesPull();
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertSame(
+            'remote child',
+            file_get_contents($this->localTree . '/tree/child.txt')
+        );
+    }
+
+    public function testMirrorRestoresLocalChangesThroughRemap(): void
+    {
+        $arguments = [
+            '--remap',
+            '/var/www/html',
+            ':fs-root:/var/www/html/remapped',
+        ];
+        $initial = $this->runFilesPull($arguments);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        file_put_contents(
+            $this->localTree . '/remapped/edited.txt',
+            'local remapped edit'
+        );
+
+        $this->abortFilesPull();
+        $pull = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertSame(
+            'old',
+            file_get_contents($this->localTree . '/remapped/edited.txt')
+        );
+    }
+
     public function testResumeReplaysTheWALIntoTheLocalIndex(): void
     {
         $this->completeFilesPull();
