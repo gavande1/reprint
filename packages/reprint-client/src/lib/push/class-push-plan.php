@@ -77,10 +77,10 @@ require_once __DIR__ . '/../sort-index-file.php';
  * @phpstan-type FileSyncPlannerCursor array{patch_base_index_file:string,patch_result_index_file:string,active_deletion_roots_file:string,included_index_path_roots:list<string>,excluded_index_path_roots:list<string>,index_diff_cursor:FileSyncPlannerIndexDiffCursor,active_deletion_root_byte_offset:int|null}
  * @phpstan-type MappingRemoteIndexCursor array{phase:'mapping_remote_index',next_remote_index_byte_offset:int,mapped_remote_index_byte_offset:int}
  * @phpstan-type SortingMappedRemoteIndexCursor array{phase:'sorting_mapped_remote_index'}
- * @phpstan-type IndexDiffCursor array{phase:'diffing',file_sync_planner_cursor:FileSyncPlannerCursor,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,byte_offset_in_remote_paths_to_fetch?:int,mapped_remote_index_byte_offset?:int,local_paths_to_push_count:int|null,local_file_bytes_to_push:int|null}
+ * @phpstan-type IndexDiffCursor array{phase:'diffing',file_sync_planner_cursor:FileSyncPlannerCursor,byte_offset_in_local_paths_to_push:int,byte_offset_in_local_paths_to_delete:int,fetch_list_byte_offset?:int,mapped_remote_index_byte_offset?:int,local_paths_to_push_count:int|null,local_file_bytes_to_push:int|null}
  * @phpstan-type CompleteCursor array{phase:'complete',local_paths_to_push_count:int|null,local_file_bytes_to_push:int|null}
  * @phpstan-type PushPlanPosition MappingRemoteIndexCursor|SortingMappedRemoteIndexCursor|IndexingCursor|SortingFreshLocalIndexCursor|StartingDiffCursor|IndexDiffCursor|CompleteCursor
- * @phpstan-type PushPlanCursor array{plan_directory:string,filesystem_root:string,local_index_file:string,document_root_local_relative_path:string,mapped_remote_index_file?:string,next_remote_index_file?:string,included_index_path_roots?:list<string>,excluded_index_path_roots?:list<string>,position:PushPlanPosition}
+ * @phpstan-type PushPlanCursor array{plan_directory:string,filesystem_root:string,local_index_file:string,document_root_local_relative_path:string,mapped_remote_index_file?:string,next_remote_index_file?:string,fetch_list_file?:string,included_index_path_roots?:list<string>,excluded_index_path_roots?:list<string>,position:PushPlanPosition}
  */
 class PushPlan
 {
@@ -103,7 +103,7 @@ class PushPlan
     private string $local_paths_to_delete;
 
     /** @var string JSONL file of remote paths needed by a mirror pull. */
-    private string $remote_paths_to_fetch;
+    private string $fetch_list_file;
 
     /** @var string|null Current remote index mapped to local-index paths. */
     private ?string $mapped_remote_index_file = null;
@@ -143,7 +143,7 @@ class PushPlan
     /** @var resource|null */
     private $local_paths_to_delete_handle = null;
     /** @var resource|null */
-    private $remote_paths_to_fetch_handle = null;
+    private $fetch_list_handle = null;
     private IndexReader $mapped_remote_index_reader;
     /** @var array<string,mixed>|null */
     private ?array $mapped_remote_index_entry = null;
@@ -228,6 +228,7 @@ class PushPlan
         string $filesystem_root,
         string $local_index_file,
         string $next_remote_index_file,
+        string $fetch_list_file,
         string $state_directory,
         array $included_remote_roots,
         array $excluded_remote_roots,
@@ -237,6 +238,7 @@ class PushPlan
         $plan = new self($plan_directory, $filesystem_root, $local_index_file, "");
         $plan->mapped_remote_index_file = wp_join_unix_paths($plan_directory, "mapped_remote_index.jsonl");
         $plan->next_remote_index_file = $next_remote_index_file;
+        $plan->fetch_list_file = $fetch_list_file;
         $plan->map_remote_path = $map_remote_path;
         $plan->remote_path_is_selected = $remote_path_is_selected;
         foreach ($included_remote_roots as $remote_root) {
@@ -274,6 +276,7 @@ class PushPlan
             "document_root_local_relative_path" => "",
             "mapped_remote_index_file" => $plan->mapped_remote_index_file,
             "next_remote_index_file" => $next_remote_index_file,
+            "fetch_list_file" => $fetch_list_file,
             "included_index_path_roots" => $plan->included_index_path_roots,
             "excluded_index_path_roots" => $plan->excluded_index_path_roots,
             "position" => [
@@ -331,6 +334,7 @@ class PushPlan
         if (array_key_exists("mapped_remote_index_file", $cursor)) {
             $plan->mapped_remote_index_file = $cursor["mapped_remote_index_file"];
             $plan->next_remote_index_file = $cursor["next_remote_index_file"];
+            $plan->fetch_list_file = $cursor["fetch_list_file"];
             $plan->included_index_path_roots = $cursor["included_index_path_roots"];
             $plan->excluded_index_path_roots = $cursor["excluded_index_path_roots"];
             $plan->map_remote_path = $map_remote_path;
@@ -366,7 +370,7 @@ class PushPlan
                 $position["byte_offset_in_local_paths_to_delete"],
                 $plan->mapped_remote_index_file === null
                     ? 0
-                    : $position["byte_offset_in_remote_paths_to_fetch"],
+                    : $position["fetch_list_byte_offset"],
                 $plan->mapped_remote_index_file === null
                     ? 0
                     : $position["mapped_remote_index_byte_offset"]
@@ -439,17 +443,11 @@ class PushPlan
         return $this->local_paths_to_delete;
     }
 
-    /** Returns the JSONL remote paths needed by a mirror pull. */
-    public function get_remote_paths_to_fetch_path(): string
-    {
-        return $this->remote_paths_to_fetch;
-    }
-
     /**
      * Returns the mirror operation produced by the latest step.
      *
      * The caller removes this local path. A `copy` or `replace` operation also
-     * has a matching remote path in get_remote_paths_to_fetch_path().
+     * has a matching path in the caller's fetch list.
      *
      * @return array|null {
      *     Mirror operation, or null when the latest step changed no local path.
@@ -484,7 +482,7 @@ class PushPlan
         if (
             ( is_resource($this->local_paths_to_push_handle) && !fflush($this->local_paths_to_push_handle) )
             || ( is_resource($this->local_paths_to_delete_handle) && !fflush($this->local_paths_to_delete_handle) )
-            || ( is_resource($this->remote_paths_to_fetch_handle) && !fflush($this->remote_paths_to_fetch_handle) )
+            || ( is_resource($this->fetch_list_handle) && !fflush($this->fetch_list_handle) )
             || ( is_resource($this->mapped_remote_index_handle) && !fflush($this->mapped_remote_index_handle) )
         ) {
             throw new RuntimeException("Failed to flush a push-plan output.");
@@ -519,7 +517,6 @@ class PushPlan
             rtrim($document_root_local_relative_path, "/");
         $this->local_paths_to_push = wp_join_unix_paths($plan_directory, "local_paths_to_push.jsonl");
         $this->local_paths_to_delete = wp_join_unix_paths($plan_directory, "local_paths_to_delete");
-        $this->remote_paths_to_fetch = wp_join_unix_paths($plan_directory, "remote_paths_to_fetch.jsonl");
         $this->fresh_local_index_file = wp_join_unix_paths($plan_directory, "fresh_local_index.jsonl");
         $this->excluded_paths_file = wp_join_unix_paths($plan_directory, "excluded_paths.json");
         $this->active_deletion_roots_file = wp_join_unix_paths($plan_directory, "deleted_directories_stack.jsonl");
@@ -685,7 +682,7 @@ class PushPlan
             "local_file_bytes_to_push" => 0,
         ];
         if ($this->mapped_remote_index_file !== null) {
-            $position["byte_offset_in_remote_paths_to_fetch"] = 0;
+            $position["fetch_list_byte_offset"] = 0;
             $position["mapped_remote_index_byte_offset"] = 0;
         }
         $this->cursor["position"] = $position;
@@ -696,24 +693,25 @@ class PushPlan
     private function open_plan_output_files(
         int $byte_offset_in_local_paths_to_push,
         int $byte_offset_in_local_paths_to_delete,
-        int $byte_offset_in_remote_paths_to_fetch,
+        int $fetch_list_byte_offset,
         int $mapped_remote_index_byte_offset
     ): void {
-        $this->local_paths_to_push_handle =
-            $this->open_push_plan_output_file_at_byte_offset(
-                $this->local_paths_to_push,
-                $byte_offset_in_local_paths_to_push
-            );
-        $this->local_paths_to_delete_handle =
-            $this->open_push_plan_output_file_at_byte_offset(
-                $this->local_paths_to_delete,
-                $byte_offset_in_local_paths_to_delete
-            );
-        if ($this->mapped_remote_index_file !== null) {
-            $this->remote_paths_to_fetch_handle =
+        if ($this->mapped_remote_index_file === null) {
+            $this->local_paths_to_push_handle =
                 $this->open_push_plan_output_file_at_byte_offset(
-                    $this->remote_paths_to_fetch,
-                    $byte_offset_in_remote_paths_to_fetch
+                    $this->local_paths_to_push,
+                    $byte_offset_in_local_paths_to_push
+                );
+            $this->local_paths_to_delete_handle =
+                $this->open_push_plan_output_file_at_byte_offset(
+                    $this->local_paths_to_delete,
+                    $byte_offset_in_local_paths_to_delete
+                );
+        } else {
+            $this->fetch_list_handle =
+                $this->open_push_plan_output_file_at_byte_offset(
+                    $this->fetch_list_file,
+                    $fetch_list_byte_offset
                 );
             $this->mapped_remote_index_reader = new IndexReader(
                 $this->mapped_remote_index_file
@@ -775,9 +773,9 @@ class PushPlan
 
         if (!$this->patch_planner->next_path()) {
             if (
-                !fflush($this->local_paths_to_push_handle)
-                || !fflush($this->local_paths_to_delete_handle)
-                || ( is_resource($this->remote_paths_to_fetch_handle) && !fflush($this->remote_paths_to_fetch_handle) )
+                ( is_resource($this->local_paths_to_push_handle) && !fflush($this->local_paths_to_push_handle) )
+                || ( is_resource($this->local_paths_to_delete_handle) && !fflush($this->local_paths_to_delete_handle) )
+                || ( is_resource($this->fetch_list_handle) && !fflush($this->fetch_list_handle) )
             ) {
                 throw new RuntimeException("Failed to flush a push-plan output.");
             }
@@ -796,7 +794,6 @@ class PushPlan
             : $operation;
         if ($operation !== null) {
             if ($this->mapped_remote_index_file !== null) {
-                $this->append_local_path_to_delete($operation["path"]);
                 if ($operation["action"] !== "delete") {
                     while (
                         $this->mapped_remote_index_entry !== null
@@ -815,8 +812,8 @@ class PushPlan
                             ["path" => base64_encode($this->mapped_remote_index_entry["remote_absolute_path"])],
                             JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
                         ) . "\n";
-                        if (fwrite($this->remote_paths_to_fetch_handle, $line) !== strlen($line)) {
-                            throw new RuntimeException("Short write on mirror fetch list {$this->remote_paths_to_fetch}, is the disk full?");
+                        if (fwrite($this->fetch_list_handle, $line) !== strlen($line)) {
+                            throw new RuntimeException("Short write on mirror fetch list {$this->fetch_list_file}, is the disk full?");
                         }
                         $this->mapped_remote_index_byte_offset =
                             $this->mapped_remote_index_reader->byte_offset();
@@ -845,9 +842,9 @@ class PushPlan
         $complete = $this->patch_planner->is_complete();
         if ($complete) {
             if (
-                !fflush($this->local_paths_to_push_handle)
-                || !fflush($this->local_paths_to_delete_handle)
-                || ( is_resource($this->remote_paths_to_fetch_handle) && !fflush($this->remote_paths_to_fetch_handle) )
+                ( is_resource($this->local_paths_to_push_handle) && !fflush($this->local_paths_to_push_handle) )
+                || ( is_resource($this->local_paths_to_delete_handle) && !fflush($this->local_paths_to_delete_handle) )
+                || ( is_resource($this->fetch_list_handle) && !fflush($this->fetch_list_handle) )
             ) {
                 throw new RuntimeException("Failed to flush a push-plan output.");
             }
@@ -865,15 +862,15 @@ class PushPlan
                 "file_sync_planner_cursor" =>
                     $this->patch_planner->get_cursor(),
                 "byte_offset_in_local_paths_to_push" =>
-                    ftell($this->local_paths_to_push_handle),
+                    is_resource($this->local_paths_to_push_handle) ? ftell($this->local_paths_to_push_handle) : 0,
                 "byte_offset_in_local_paths_to_delete" =>
-                    ftell($this->local_paths_to_delete_handle),
+                    is_resource($this->local_paths_to_delete_handle) ? ftell($this->local_paths_to_delete_handle) : 0,
                 "local_paths_to_push_count" => $local_paths_to_push_count,
                 "local_file_bytes_to_push" => $local_file_bytes_to_push,
             ];
             if ($this->mapped_remote_index_file !== null) {
-                $position["byte_offset_in_remote_paths_to_fetch"] =
-                    ftell($this->remote_paths_to_fetch_handle);
+                $position["fetch_list_byte_offset"] =
+                    ftell($this->fetch_list_handle);
                 $position["mapped_remote_index_byte_offset"] =
                     $this->mapped_remote_index_byte_offset;
             }
@@ -903,8 +900,8 @@ class PushPlan
         if (is_resource($this->local_paths_to_delete_handle)) {
             fclose($this->local_paths_to_delete_handle);
         }
-        if (is_resource($this->remote_paths_to_fetch_handle)) {
-            fclose($this->remote_paths_to_fetch_handle);
+        if (is_resource($this->fetch_list_handle)) {
+            fclose($this->fetch_list_handle);
         }
         if (isset($this->mapped_remote_index_reader)) {
             $this->mapped_remote_index_reader->close();
@@ -917,7 +914,7 @@ class PushPlan
         }
         $this->local_paths_to_push_handle = null;
         $this->local_paths_to_delete_handle = null;
-        $this->remote_paths_to_fetch_handle = null;
+        $this->fetch_list_handle = null;
         $this->mapped_remote_index_handle = null;
         $this->closed = true;
     }

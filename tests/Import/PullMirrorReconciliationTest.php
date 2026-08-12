@@ -255,6 +255,7 @@ final class PullMirrorReconciliationTest extends TestCase
                     $this->property($client, 'filesystem_root'),
                     $this->property($client, 'local_index_file'),
                     $this->property($client, 'next_remote_index_file'),
+                    $this->property($client, 'fetch_list_file'),
                     $this->stateDirectory,
                     $this->property($client, 'pull_only_files_with_path_prefixes'),
                     $this->property($client, 'pull_excluded_files_with_path_prefixes'),
@@ -283,7 +284,8 @@ final class PullMirrorReconciliationTest extends TestCase
             }
             $this->assertLessThan(1000, ++$stepCount, 'Mirror plan did not complete.');
         } while ($hasNextStep);
-        copy($plan->get_remote_paths_to_fetch_path(), $this->property($client, 'fetch_list_file'));
+        $this->assertFileDoesNotExist($planDirectory . '/local_paths_to_push.jsonl');
+        $this->assertFileDoesNotExist($planDirectory . '/local_paths_to_delete');
     }
 
     private function property(object $target, string $property)

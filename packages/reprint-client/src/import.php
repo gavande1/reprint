@@ -3121,7 +3121,7 @@ class ImportClient
             $mirror = $mirror_cursor === null
                 ? PushPlan::start_mirror(
                     $this->files_pull_mirror_plan_directory, $this->filesystem_root, $this->local_index_file,
-                    $this->next_remote_index_file, $this->state_dir, $this->pull_only_files_with_path_prefixes,
+                    $this->next_remote_index_file, $this->fetch_list_file, $this->state_dir, $this->pull_only_files_with_path_prefixes,
                     $this->pull_excluded_files_with_path_prefixes, $map_remote_path, $path_is_selected
                 )
                 : PushPlan::resume($mirror_cursor, $map_remote_path, $path_is_selected);
@@ -3146,9 +3146,6 @@ class ImportClient
                 $this->get_state()->active_resumable_command->completion_state = "partial";
                 $this->save_state();
                 return;
-            }
-            if (!copy($mirror->get_remote_paths_to_fetch_path(), $this->fetch_list_file)) {
-                throw new RuntimeException("Failed to copy the completed mirror fetch list.");
             }
             $this->get_state()->active_resumable_command->current_stage = "diff";
             $this->get_state()->diff = new FileDiffProgressState();
