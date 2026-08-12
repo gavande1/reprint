@@ -105,7 +105,6 @@ require_once __DIR__ . '/lib/pull/class-pull.php';
 // Pull index reader and the WAL for completed files-pull mutations.
 require_once __DIR__ . '/lib/index/class-index-reader.php';
 require_once __DIR__ . '/lib/pull/class-pull-index-journal.php';
-require_once __DIR__ . '/lib/pull/class-pull-mirror-processor.php';
 
 /**
  * The wire-protocol version this importer speaks.
@@ -228,7 +227,6 @@ class ImportClient
 
     /** @var string Files-pull mirror work directory. */
     private $files_pull_mirror_plan_directory;
-
     /** @var string Path to audit.log — append-only log of every operation for debugging. */
     private $audit_log_file;
 
@@ -336,7 +334,6 @@ class ImportClient
 
     /** @var string Whether files-pull catches up to remote changes or mirrors the remote tree. */
     private $files_pull_sync = "mirror";
-
     /** @var string|null Extra remote directory to include in the export (--extra-directory). */
     private $extra_directory = null;
 
@@ -2941,7 +2938,6 @@ class ImportClient
         if ($this->files_pull_sync === "mirror" && $this->fs_root_nonempty_behavior === "preserve-local") {
             throw new InvalidArgumentException("--sync=mirror cannot preserve local paths. Use --sync=catch-up with --on-fs-root-nonempty=preserve-local.");
         }
-
         $this->pull_index_journal->apply_pending_records();
         $this->assert_files_pull_path_selection_unchanged_while_resuming($has_progress);
         $this->assert_local_followed_symlinks_root_unchanged();
@@ -3102,8 +3098,7 @@ class ImportClient
                 }
             }
             $this->sort_next_remote_index_file();
-            $this->get_state()->active_resumable_command->current_stage =
-                $this->files_pull_sync === "mirror" && is_file($this->local_index_file) ? "mirror" : "diff";
+            $this->get_state()->active_resumable_command->current_stage = $this->files_pull_sync === "mirror" && is_file($this->local_index_file) ? "mirror" : "diff";
             $this->get_state()->diff = new FileDiffProgressState();
             if (file_exists($this->fetch_list_file)) {
                 @unlink($this->fetch_list_file);
@@ -3119,20 +3114,27 @@ class ImportClient
             $mirror_cursor = $this->get_state()->files_pull_mirror_cursor;
             $map_remote_path = fn(string $path): string => $this->map_remote_absolute_path_to_local_absolute_path($path);
             $path_is_selected = fn(string $path): bool => $this->is_selected_for_pulling($path, true);
-            $remove_local_path = fn(string $path): bool => $this->remove_local_absolute_path_without_following_symlinks($path);
-            $append_fetch_path = fn(string $path, $handle) => $this->append_to_fetch_list($path, $handle);
+            if ($mirror_cursor === null) {
+                $this->remove_local_plan_directory($this->files_pull_mirror_plan_directory);
+                mkdir($this->files_pull_mirror_plan_directory, 0755, true);
+            }
             $mirror = $mirror_cursor === null
-                ? PullMirrorProcessor::create(
+                ? PushPlan::start_mirror(
                     $this->files_pull_mirror_plan_directory, $this->filesystem_root, $this->local_index_file,
-                    $this->next_remote_index_file, $this->fetch_list_file, $this->state_dir,
-                    $this->pull_only_files_with_path_prefixes, $this->pull_excluded_files_with_path_prefixes,
-                    $map_remote_path, $path_is_selected, $remove_local_path, $append_fetch_path
+                    $this->next_remote_index_file, $this->state_dir, $this->pull_only_files_with_path_prefixes,
+                    $this->pull_excluded_files_with_path_prefixes, $map_remote_path, $path_is_selected
                 )
-                : PullMirrorProcessor::resume($mirror_cursor, $map_remote_path, $path_is_selected, $remove_local_path, $append_fetch_path);
+                : PushPlan::resume($mirror_cursor, $map_remote_path, $path_is_selected);
             $has_next_mirror_step = true;
             try {
                 while (!$this->shutdown_requested && $has_next_mirror_step) {
                     $has_next_mirror_step = $mirror->next_step();
+                    $operation = $mirror->get_operation();
+                    if ($operation !== null && !$this->remove_local_absolute_path_without_following_symlinks(wp_join_unix_paths(
+                        $this->filesystem_root, $operation["path"]
+                    ))) {
+                        throw new RuntimeException("Failed to remove local path before mirroring it: {$operation["path"]}.");
+                    }
                     $mirror->flush_pending_outputs();
                     $this->get_state()->files_pull_mirror_cursor = $mirror->get_cursor();
                     $this->save_state();
@@ -3144,6 +3146,9 @@ class ImportClient
                 $this->get_state()->active_resumable_command->completion_state = "partial";
                 $this->save_state();
                 return;
+            }
+            if (!copy($mirror->get_remote_paths_to_fetch_path(), $this->fetch_list_file)) {
+                throw new RuntimeException("Failed to copy the completed mirror fetch list.");
             }
             $this->get_state()->active_resumable_command->current_stage = "diff";
             $this->get_state()->diff = new FileDiffProgressState();
@@ -3159,10 +3164,9 @@ class ImportClient
                 return;
             }
 
-            if ($this->get_state()->files_pull_mirror_cursor !== null) {
+            if ($this->files_pull_sync === "mirror") {
                 sort_index_file($this->fetch_list_file);
             }
-
             $has_files_to_fetch =
                 file_exists($this->fetch_list_file) &&
                 filesize($this->fetch_list_file) > 0;
@@ -6605,8 +6609,7 @@ class ImportClient
             $file_diff_progress_state->last_consumed_remote_index_entry_path;
         $last_processed_next_remote_index_entry_path =
             $file_diff_progress_state->last_processed_next_remote_index_entry_path;
-        $mirror_fetch_list_byte_offset = $this->get_state()->files_pull_mirror_cursor["fetch_list_byte_offset"] ?? 0;
-        $fetch_list_file_mode = $next_remote_index_byte_offset > 0 || $mirror_fetch_list_byte_offset > 0 ? "a" : "w";
+        $fetch_list_file_mode = $next_remote_index_byte_offset > 0 || ( is_file($this->fetch_list_file) && filesize($this->fetch_list_file) > 0 ) ? "a" : "w";
         if ($fetch_list_file_mode === "w") {
             $this->audit_log(
                 "FILE CREATE | {$this->fetch_list_file} | building fetch list",
@@ -11284,10 +11287,8 @@ if (
 
         // ── files-pull options ───────────────────────────────────
         [
-            'name' => 'sync',
-            'type' => 'value',
-            'target' => 'sync',
-            'placeholder' => 'SYNC',
+            'name' => 'sync', 'type' => 'value',
+            'target' => 'sync', 'placeholder' => 'SYNC',
             'valid_values' => ['catch-up', 'mirror'],
             'help' => 'File sync behavior: catch-up applies remote changes; mirror matches the remote (default: mirror)',
             'commands' => ['pull', 'pull-files', 'files-pull'],

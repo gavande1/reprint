@@ -244,50 +244,46 @@ final class PullMirrorReconciliationTest extends TestCase
             'is_selected_for_pulling',
             [$path, true]
         );
-        $removeLocalPath = fn(string $path): bool => $this->call(
-            $client,
-            'remove_local_absolute_path_without_following_symlinks',
-            [$path]
-        );
-        $appendFetchPath = fn(string $path, $handle) => $this->call(
-            $client,
-            'append_to_fetch_list',
-            [$path, $handle]
-        );
+        $planDirectory = $this->property($client, 'files_pull_mirror_plan_directory');
+        mkdir($planDirectory, 0700, true);
         $cursor = null;
         $stepCount = 0;
         do {
-            $processor = $cursor === null
-                ? \PullMirrorProcessor::create(
-                    $this->property($client, 'files_pull_mirror_plan_directory'),
+            $plan = $cursor === null
+                ? \PushPlan::start_mirror(
+                    $planDirectory,
                     $this->property($client, 'filesystem_root'),
                     $this->property($client, 'local_index_file'),
                     $this->property($client, 'next_remote_index_file'),
-                    $this->property($client, 'fetch_list_file'),
                     $this->stateDirectory,
                     $this->property($client, 'pull_only_files_with_path_prefixes'),
                     $this->property($client, 'pull_excluded_files_with_path_prefixes'),
                     $mapRemotePath,
-                    $pathIsSelected,
-                    $removeLocalPath,
-                    $appendFetchPath
+                    $pathIsSelected
                 )
-                : \PullMirrorProcessor::resume(
+                : \PushPlan::resume(
                     $cursor,
                     $mapRemotePath,
-                    $pathIsSelected,
-                    $removeLocalPath,
-                    $appendFetchPath
+                    $pathIsSelected
                 );
             try {
-                $hasNextStep = $processor->next_step();
-                $processor->flush_pending_outputs();
-                $cursor = $processor->get_cursor();
+                $hasNextStep = $plan->next_step();
+                $operation = $plan->get_operation();
+                if ($operation !== null) {
+                    $this->call(
+                        $client,
+                        'remove_local_absolute_path_without_following_symlinks',
+                        [$this->filesystemRoot . '/' . $operation['path']]
+                    );
+                }
+                $plan->flush_pending_outputs();
+                $cursor = $plan->get_cursor();
             } finally {
-                $processor->close();
+                $plan->close();
             }
-            $this->assertLessThan(1000, ++$stepCount, 'Mirror processor did not complete.');
+            $this->assertLessThan(1000, ++$stepCount, 'Mirror plan did not complete.');
         } while ($hasNextStep);
+        copy($plan->get_remote_paths_to_fetch_path(), $this->property($client, 'fetch_list_file'));
     }
 
     private function property(object $target, string $property)
